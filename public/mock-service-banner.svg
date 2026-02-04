@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0ea5a4"/>
+      <stop offset="60%" stop-color="#22c55e"/>
+      <stop offset="100%" stop-color="#f97316"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <circle cx="1350" cy="150" r="220" fill="#fff" opacity="0.14"/>
+  <circle cx="120" cy="780" r="260" fill="#000" opacity="0.10"/>
+
+  <!-- Left: mock social posts grid -->
+  <g transform="translate(110 140)" filter="url(#shadow)">
+    <rect x="0" y="0" rx="24" ry="24" width="620" height="620" fill="#0b1220" opacity="0.85"/>
+
+    <!-- Post cards -->
+    <g transform="translate(36 38)">
+      <rect x="0" y="0" rx="18" width="548" height="150" fill="#ffffff" opacity="0.92"/>
+      <circle cx="54" cy="52" r="22" fill="#0ea5a4"/>
+      <rect x="92" y="38" width="310" height="16" rx="8" fill="#0b1220" opacity="0.85"/>
+      <rect x="92" y="66" width="420" height="12" rx="6" fill="#0b1220" opacity="0.35"/>
+      <rect x="92" y="92" width="380" height="12" rx="6" fill="#0b1220" opacity="0.28"/>
+      <rect x="92" y="118" width="180" height="10" rx="5" fill="#22c55e" opacity="0.75"/>
+
+      <rect x="0" y="182" rx="18" width="548" height="150" fill="#ffffff" opacity="0.90"/>
+      <circle cx="54" cy="234" r="22" fill="#f97316"/>
+      <rect x="92" y="220" width="280" height="16" rx="8" fill="#0b1220" opacity="0.85"/>
+      <rect x="92" y="248" width="410" height="12" rx="6" fill="#0b1220" opacity="0.35"/>
+      <rect x="92" y="274" width="360" height="12" rx="6" fill="#0b1220" opacity="0.28"/>
+      <rect x="92" y="300" width="210" height="10" rx="5" fill="#0ea5a4" opacity="0.75"/>
+
+      <rect x="0" y="364" rx="18" width="548" height="150" fill="#ffffff" opacity="0.88"/>
+      <circle cx="54" cy="416" r="22" fill="#22c55e"/>
+      <rect x="92" y="402" width="320" height="16" rx="8" fill="#0b1220" opacity="0.85"/>
+      <rect x="92" y="430" width="420" height="12" rx="6" fill="#0b1220" opacity="0.35"/>
+      <rect x="92" y="456" width="360" height="12" rx="6" fill="#0b1220" opacity="0.28"/>
+      <rect x="92" y="482" width="160" height="10" rx="5" fill="#f97316" opacity="0.75"/>
+    </g>
+  </g>
+
+  <!-- Right: headline block -->
+  <g transform="translate(820 230)">
+    <rect x="0" y="0" rx="26" width="680" height="440" fill="#ffffff" opacity="0.90" filter="url(#shadow)"/>
+    <g transform="translate(44 44)">
+      <rect x="0" y="0" width="240" height="14" rx="7" fill="#0ea5a4" opacity="0.9"/>
+      <rect x="0" y="34" width="520" height="44" rx="12" fill="#0b1220" opacity="0.9"/>
+      <rect x="0" y="88" width="460" height="22" rx="11" fill="#0b1220" opacity="0.55"/>
+
+      <rect x="0" y="150" width="590" height="16" rx="8" fill="#0b1220" opacity="0.22"/>
+      <rect x="0" y="176" width="540" height="16" rx="8" fill="#0b1220" opacity="0.18"/>
+      <rect x="0" y="202" width="500" height="16" rx="8" fill="#0b1220" opacity="0.16"/>
+
+      <rect x="0" y="270" width="220" height="54" rx="16" fill="#22c55e"/>
+      <rect x="250" y="270" width="220" height="54" rx="16" fill="#0ea5a4"/>
+      <rect x="0" y="350" width="420" height="12" rx="6" fill="#0b1220" opacity="0.20"/>
+      <rect x="0" y="372" width="380" height="12" rx="6" fill="#0b1220" opacity="0.16"/>
+    </g>
+  </g>
+</svg>

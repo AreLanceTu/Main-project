@@ -1,0 +1,22 @@
+# Firebase ignore rules
+# See: https://firebase.google.com/docs/cli#the_firebaseignore_file
+
+# Local dependencies
+node_modules/
+
+# VCS / editor
+.git/
+.vscode/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Source (only dist is deployed)
+src/
+public/
+
+# Config / misc
+README.md

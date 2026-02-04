@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>GigFlow - Razorpay (Supabase) Demo</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; }
+      .card { max-width: 720px; margin: 0 auto; border: 1px solid #ddd; border-radius: 12px; padding: 16px; }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; }
+      input { padding: 10px; border-radius: 8px; border: 1px solid #ccc; min-width: 260px; }
+      button { padding: 10px 14px; border-radius: 10px; border: 0; background: #111; color: #fff; cursor: pointer; }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
+      .muted { color: #555; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>GigFlow Razorpay Checkout (Supabase Backend)</h1>
+      <p class="muted">
+        This demo calls Supabase Edge Functions to create an order for <b>₹499</b> (server-side) and
+        then verifies the payment signature on the backend.
+      </p>
+
+      <h3>1) Configure your Supabase Functions URL</h3>
+      <p class="muted">
+        Paste your Supabase Edge Functions base URL. Either format works:
+        <br />
+        <code>https://&lt;project-ref&gt;.supabase.co/functions/v1</code>
+        <br />
+        <span class="muted">or</span>
+        <br />
+        <code>https://&lt;project-ref&gt;.functions.supabase.co</code>
+      </p>
+      <div class="row">
+        <input id="baseUrl" placeholder="https://xxxxx.supabase.co/functions/v1" />
+        <button id="saveBtn">Save</button>
+      </div>
+
+      <h3 style="margin-top: 18px;">2) Pay</h3>
+      <p class="muted">Amount is fixed to ₹499 on the backend.</p>
+      <button id="payBtn">Pay ₹499</button>
+
+      <pre id="log" class="muted" style="margin-top: 16px; white-space: pre-wrap;"></pre>
+    </div>
+
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+
+    <script>
+      const baseUrlInput = document.getElementById('baseUrl');
+      const saveBtn = document.getElementById('saveBtn');
+      const payBtn = document.getElementById('payBtn');
+      const logEl = document.getElementById('log');
+
+      const params = new URLSearchParams(location.search);
+      const qsBaseUrl = params.get('baseUrl') || '';
+      const qsRef = params.get('ref') || '';
+
+      const saved = localStorage.getItem('SUPABASE_FUNCTIONS_URL') || '';
+      const derivedFromRef = qsRef ? `https://${qsRef}.functions.supabase.co` : '';
+
+      baseUrlInput.value = saved || qsBaseUrl || derivedFromRef;
+
+      function log(msg) {
+        logEl.textContent = String(msg);
+      }
+
+      function normalizeBaseUrl(url) {
+        let v = String(url || '').trim();
+        v = v.replace(/\/$/, '');
+
+        // Accept full Supabase URL and convert to functions base URL.
+        // https://<ref>.supabase.co  -> https://<ref>.supabase.co/functions/v1
+        if (/^https:\/\/[^/]+\.supabase\.co$/i.test(v)) {
+          v = v + '/functions/v1';
+        }
+
+        // If user pastes the .functions.supabase.co host, keep it.
+        // If they paste .supabase.co but forget /functions/v1, add it.
+        if (/^https:\/\/[^/]+\.supabase\.co(\/.*)?$/i.test(v) && !/\/functions\/v1$/i.test(v)) {
+          // Add /functions/v1 only if it isn't already present.
+          // (e.g. user pasted https://<ref>.supabase.co/rest/v1 -> not a functions base)
+          if (/^https:\/\/[^/]+\.supabase\.co$/i.test(v)) {
+            v = v + '/functions/v1';
+          }
+        }
+
+        return v;
+      }
+
+      saveBtn.addEventListener('click', () => {
+        const v = normalizeBaseUrl(baseUrlInput.value);
+        localStorage.setItem('SUPABASE_FUNCTIONS_URL', v);
+        log('Saved functions URL.');
+      });
+
+      payBtn.addEventListener('click', async () => {
+        const baseUrl = normalizeBaseUrl(baseUrlInput.value || localStorage.getItem('SUPABASE_FUNCTIONS_URL'));
+        if (!baseUrl) {
+          log('Please enter your Supabase Functions base URL first.');
+          return;
+        }
+
+        payBtn.disabled = true;
+        log('Creating order on backend...');
+
+        try {
+          // 1) Create order on backend (₹499 is enforced server-side)
+          const orderRes = await fetch(`${baseUrl}/payments-create-order`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              currency: 'INR',
+              purpose: 'Example payment (₹499)'
+            })
+          });
+
+          const order = await orderRes.json().catch(() => ({}));
+          if (!orderRes.ok) {
+            if (orderRes.status === 404) {
+              throw new Error(
+                'Supabase function not found (404). Make sure you deployed payments-create-order and you pasted the correct base URL.'
+              );
+            }
+            throw new Error(order.error || 'Order creation failed');
+          }
+
+          log('Opening Razorpay Checkout...');
+
+          // 2) Open Razorpay Checkout (Key ID is safe to use in browser)
+          const options = {
+            key: order.razorpayKeyId,
+            amount: order.amount,   // paise
+            currency: order.currency,
+            order_id: order.orderId,
+            name: 'GigFlow',
+            description: 'Example payment (₹499)',
+
+            // 3) Verify signature on backend
+            handler: async function (resp) {
+              log('Payment success. Verifying signature on backend...');
+
+              const verifyRes = await fetch(`${baseUrl}/payments-verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  razorpay_order_id: resp.razorpay_order_id,
+                  razorpay_payment_id: resp.razorpay_payment_id,
+                  razorpay_signature: resp.razorpay_signature
+                })
+              });
+
+              const verify = await verifyRes.json().catch(() => ({}));
+              if (verifyRes.ok && verify.ok) {
+                log('Verified OK. Status: ' + (verify.status || 'paid'));
+              } else {
+                log('Verification failed: ' + (verify.error || 'unknown'));
+              }
+            },
+
+            modal: {
+              ondismiss: () => log('Checkout closed/cancelled.')
+            }
+          };
+
+          const rzp = new Razorpay(options);
+          rzp.open();
+        } catch (e) {
+          log(e && e.message ? e.message : String(e));
+        } finally {
+          payBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

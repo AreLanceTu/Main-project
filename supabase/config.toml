@@ -1,0 +1,53 @@
+# Supabase CLI config.
+# We disable Supabase JWT verification for these functions because:
+# - The app uses Firebase Auth, not Supabase Auth.
+# - We verify Firebase ID tokens inside the functions.
+# - Razorpay webhooks are authenticated by Razorpay signature, not JWT.
+
+[functions.payments-create-order]
+verify_jwt = false
+
+[functions.payments-verify]
+verify_jwt = false
+
+[functions.razorpay-webhook]
+verify_jwt = false
+
+[functions.withdrawals-create]
+verify_jwt = false
+
+[functions.withdrawals-list]
+verify_jwt = false
+
+[functions.withdrawals-demo-create]
+verify_jwt = false
+
+[functions.withdrawals-demo-list]
+verify_jwt = false
+
+[functions.withdrawals-demo-simulate]
+verify_jwt = false
+
+[functions.ai-gig-title]
+verify_jwt = false
+
+[functions.ai-chat]
+verify_jwt = false
+
+[functions.chat-list]
+verify_jwt = false
+
+[functions.chat-start]
+verify_jwt = false
+
+[functions.chat-send]
+verify_jwt = false
+
+[functions.chat-messages]
+verify_jwt = false
+
+[functions.storage-signed-upload]
+verify_jwt = false
+
+[functions.storage-upload]
+verify_jwt = false
