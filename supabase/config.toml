@@ -51,3 +51,9 @@ verify_jwt = false
 
 [functions.storage-upload]
 verify_jwt = false
+
+[functions.storage-signed-download]
+verify_jwt = false
+
+[functions.subscriptions-status]
+verify_jwt = false

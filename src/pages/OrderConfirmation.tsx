@@ -16,6 +16,7 @@ export default function OrderConfirmation() {
   const serviceId = params.get("serviceId") || "";
   const paymentId = params.get("paymentId") || "";
   const sellerIdFromParams = params.get("sellerId") || "";
+  const firestoreOrderId = params.get("firestoreOrderId") || "";
 
   const gig = useMemo(() => getStoredGig(gigId), [gigId]);
   const sellerId = useMemo(() => {
@@ -24,9 +25,10 @@ export default function OrderConfirmation() {
   }, [gig, sellerIdFromParams]);
 
   const chatHref = useMemo(() => {
+    if (firestoreOrderId) return `/orders/${encodeURIComponent(firestoreOrderId)}/chat`;
     if (!sellerId) return "/messages";
     return `/messages?with=${encodeURIComponent(sellerId)}`;
-  }, [sellerId]);
+  }, [firestoreOrderId, sellerId]);
 
   const service = useMemo(() => {
     const list = (gig as any)?.services || [];
@@ -36,10 +38,10 @@ export default function OrderConfirmation() {
   useEffect(() => {
     // Only auto-redirect when this page is reached from a fresh payment.
     if (!paymentId) return;
-    if (!sellerId) return;
+    if (!firestoreOrderId && !sellerId) return;
 
     navigate(chatHref, { replace: true });
-  }, [chatHref, navigate, paymentId, sellerId]);
+  }, [chatHref, navigate, paymentId, sellerId, firestoreOrderId]);
 
   return (
     <>

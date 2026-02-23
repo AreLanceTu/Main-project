@@ -31,7 +31,7 @@ service cloud.firestore {
         && request.resource.data.serviceId is string
         && request.resource.data.serviceId.size() > 0
         && request.resource.data.paymentStatus in ['Paid', 'Failed']
-        && request.resource.data.orderStatus in ['Pending', 'Completed']
+        && request.resource.data.orderStatus in ['Pending']
         && request.resource.data.createdAt is timestamp
         && request.resource.data.keys().hasAll([
           'orderId',
@@ -53,8 +53,112 @@ service cloud.firestore {
           'razorpayPaymentId',
           'gigId',
           'sellerId',
-          'amountRupees'
+          'amountRupees',
+          'deliveryTimeDays',
+          'dueAt',
+          // Workflow defaults / state
+          'requirementsSubmitted',
+          'requirementsSubmittedAt',
+          'deliveredAt',
+          'completedAt',
+          'revisionCount',
+          'revisionLimit',
+          'revisionRequestedAt',
+          'autoCompleteAt',
+          'updatedAt'
         ]);
+    }
+
+    function orderParticipants(orderId) {
+      return get(/databases/$(database)/documents/orders/$(orderId));
+    }
+
+    function isOrderBuyer(orderId) {
+      return isSignedIn() && orderParticipants(orderId).data.clientId == request.auth.uid;
+    }
+
+    function isOrderSeller(orderId) {
+      return isSignedIn()
+        && orderParticipants(orderId).data.sellerId is string
+        && orderParticipants(orderId).data.sellerId == request.auth.uid;
+    }
+
+    function isOrderParticipant(orderId) {
+      return isOrderBuyer(orderId) || isOrderSeller(orderId);
+    }
+
+    function orderStatusUpdateKeysAllowed(keys) {
+      return keys.hasOnly([
+        'orderStatus',
+        'requirementsSubmitted',
+        'requirementsSubmittedAt',
+        'deliveredAt',
+        'completedAt',
+        'revisionCount',
+        'revisionLimit',
+        'revisionRequestedAt',
+        'autoCompleteAt',
+        'updatedAt'
+      ]);
+    }
+
+    function isValidOrderStatusUpdate(orderId) {
+      // Firestore rules functions must be pure expressions (no imperative if/return).
+      let changed = request.resource.data.diff(resource.data).changedKeys();
+
+      let coreUnchanged =
+        request.resource.data.orderId == resource.data.orderId
+        && request.resource.data.clientId == resource.data.clientId
+        && request.resource.data.serviceId == resource.data.serviceId
+        && request.resource.data.paymentStatus == resource.data.paymentStatus
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.sellerId == resource.data.sellerId
+        && request.resource.data.amountRupees == resource.data.amountRupees
+        && request.resource.data.deliveryTimeDays == resource.data.deliveryTimeDays
+        && request.resource.data.dueAt == resource.data.dueAt
+        && request.resource.data.revisionLimit == resource.data.revisionLimit
+        && (request.resource.data.updatedAt is timestamp);
+
+      let rc = (request.resource.data.revisionCount is number) ? request.resource.data.revisionCount : 0;
+      let rl = (request.resource.data.revisionLimit is number) ? request.resource.data.revisionLimit : 2;
+      let prevUsed = (resource.data.revisionCount is number) ? resource.data.revisionCount : 0;
+      let limit = (resource.data.revisionLimit is number) ? resource.data.revisionLimit : 2;
+
+      let pendingToInProgress =
+        resource.data.orderStatus == 'Pending'
+        && request.resource.data.orderStatus == 'In Progress'
+        && isOrderBuyer(orderId)
+        && request.resource.data.requirementsSubmitted == true
+        && (request.resource.data.requirementsSubmittedAt is timestamp)
+        && rc <= rl;
+
+      let inProgressOrRevisionToDelivered =
+        (resource.data.orderStatus == 'In Progress' || resource.data.orderStatus == 'Revision')
+        && request.resource.data.orderStatus == 'Delivered'
+        && isOrderSeller(orderId)
+        && (request.resource.data.deliveredAt is timestamp)
+        && (request.resource.data.autoCompleteAt is string)
+        && request.resource.data.revisionCount == resource.data.revisionCount;
+
+      let deliveredToCompleted =
+        resource.data.orderStatus == 'Delivered'
+        && request.resource.data.orderStatus == 'Completed'
+        && isOrderBuyer(orderId)
+        && (request.resource.data.completedAt is timestamp)
+        && request.resource.data.revisionCount == resource.data.revisionCount;
+
+      let deliveredToRevision =
+        resource.data.orderStatus == 'Delivered'
+        && request.resource.data.orderStatus == 'Revision'
+        && isOrderBuyer(orderId)
+        && (request.resource.data.revisionRequestedAt is timestamp)
+        && (request.resource.data.revisionCount is number)
+        && request.resource.data.revisionCount == prevUsed + 1
+        && request.resource.data.revisionCount <= limit;
+
+      return orderStatusUpdateKeysAllowed(changed)
+        && coreUnchanged
+        && (pendingToInProgress || inProgressOrRevisionToDelivered || deliveredToCompleted || deliveredToRevision);
     }
 
     function isValidServiceWrite(serviceId) {
@@ -85,6 +189,136 @@ service cloud.firestore {
           'price',
           'createdAt',
           'updatedAt'
+        ]);
+    }
+
+    function isValidGigWrite(gigId) {
+      return isSignedIn()
+        && request.resource.data.gig_id == gigId
+        && request.resource.data.seller_id == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && (!('category' in request.resource.data) || request.resource.data.category is string)
+        && (!('subcategory' in request.resource.data) || request.resource.data.subcategory is string)
+        && (!('revisions' in request.resource.data) || request.resource.data.revisions is number)
+        && (!('tags' in request.resource.data) || request.resource.data.tags is string)
+        && (!('cover_image_url' in request.resource.data) || request.resource.data.cover_image_url is string)
+        && (!('cover_bucket' in request.resource.data) || request.resource.data.cover_bucket is string)
+        && (!('cover_path' in request.resource.data) || request.resource.data.cover_path is string)
+        && (!('description_html' in request.resource.data) || request.resource.data.description_html is string)
+        && (request.resource.data.services is list)
+        && request.resource.data.services.size() > 0
+        && request.resource.data.services.size() <= 20
+        && (!('promoted' in request.resource.data) || request.resource.data.promoted is bool)
+        && (!('promoted_at' in request.resource.data) || request.resource.data.promoted_at is string)
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.keys().hasAll([
+          'gig_id',
+          'seller_id',
+          'title',
+          'services',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'gig_id',
+          'seller_id',
+          'title',
+          'category',
+          'subcategory',
+          'revisions',
+          'tags',
+          'cover_image_url',
+          'cover_bucket',
+          'cover_path',
+          'description_html',
+          'services',
+          'promoted',
+          'promoted_at',
+          'createdAt',
+          'updatedAt'
+        ]);
+    }
+
+    function isValidPaymentCreate(paymentId) {
+      return isSignedIn()
+        && request.resource.data.paymentId == paymentId
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.razorpayOrderId is string
+        && request.resource.data.razorpayOrderId.size() > 0
+        && request.resource.data.amountRupees is number
+        && request.resource.data.currency is string
+        && request.resource.data.purpose is string
+        && request.resource.data.status is string
+        && request.resource.data.quantityTotal is number
+        && request.resource.data.quantityUsed is number
+        && request.resource.data.used is bool
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.keys().hasAll([
+          'paymentId',
+          'userId',
+          'razorpayOrderId',
+          'amountRupees',
+          'currency',
+          'purpose',
+          'status',
+          'quantityTotal',
+          'quantityUsed',
+          'used',
+          'createdAt',
+          'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'paymentId',
+          'userId',
+          'razorpayOrderId',
+          'amountRupees',
+          'currency',
+          'purpose',
+          'status',
+          'quantityTotal',
+          'quantityUsed',
+          'used',
+          'createdAt',
+          'updatedAt',
+          // Optional metadata (non-sensitive)
+          'notes',
+          'related',
+          'source'
+        ]);
+    }
+
+    function isValidPaymentUsageUpdate() {
+      return isSignedIn()
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.paymentId == resource.data.paymentId
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.razorpayOrderId == resource.data.razorpayOrderId
+        && request.resource.data.amountRupees == resource.data.amountRupees
+        && request.resource.data.currency == resource.data.currency
+        && request.resource.data.purpose == resource.data.purpose
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.quantityTotal == resource.data.quantityTotal
+        && request.resource.data.quantityUsed is number
+        && request.resource.data.used is bool
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.keys().hasOnly([
+          'paymentId',
+          'userId',
+          'razorpayOrderId',
+          'amountRupees',
+          'currency',
+          'purpose',
+          'status',
+          'quantityTotal',
+          'quantityUsed',
+          'used',
+          'createdAt',
+          'updatedAt',
+          'notes',
+          'related',
+          'source'
         ]);
     }
 
@@ -205,10 +439,149 @@ service cloud.firestore {
 
     // Orders
     // - Created by the authenticated client after successful payment verification
-    // - Readable only by the owner (client)
+    // - Readable by buyer (client) and seller
     match /orders/{orderId} {
-      allow read: if isSignedIn() && resource.data.clientId == request.auth.uid;
+      allow read: if isSignedIn() && (
+        resource.data.clientId == request.auth.uid ||
+        (resource.data.sellerId is string && resource.data.sellerId == request.auth.uid)
+      );
       allow create: if isValidOrderCreate(orderId);
+      allow update: if isSignedIn() && isValidOrderStatusUpdate(orderId);
+      allow delete: if false;
+    }
+
+    // Payments
+    // - Created by the authenticated user after successful payment verification
+    // - Readable only by the owner
+    // - Updatable only for usage tracking (quantityUsed/used)
+    match /payments/{paymentId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isValidPaymentCreate(paymentId);
+      allow update: if isValidPaymentUsageUpdate();
+      allow delete: if false;
+    }
+
+    // Order requirements
+    // - Buyer submits before chat
+    // - Buyer & seller can read
+    match /order_requirements/{orderId} {
+      allow read: if isOrderParticipant(orderId);
+      allow create: if isOrderBuyer(orderId)
+        && request.resource.data.orderId == orderId
+        && request.resource.data.buyerId == request.auth.uid
+        && request.resource.data.sellerId == orderParticipants(orderId).data.sellerId
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.description is string
+        && request.resource.data.description.size() > 0
+        && request.resource.data.submittedAt is timestamp;
+      allow update, delete: if false;
+    }
+
+    // Order-linked chats
+    match /order_chats/{orderId} {
+      allow read: if isOrderParticipant(orderId);
+      allow create: if isOrderBuyer(orderId)
+        && request.resource.data.orderId == orderId
+        && request.resource.data.buyerId == orderParticipants(orderId).data.clientId
+        && request.resource.data.sellerId == orderParticipants(orderId).data.sellerId
+        && request.resource.data.participants is list
+        && request.auth.uid in request.resource.data.participants
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.lastUpdated is timestamp;
+
+      allow update: if isOrderParticipant(orderId)
+        && request.resource.data.participants == resource.data.participants;
+
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if isOrderParticipant(orderId);
+
+        // Prevent chat before requirements are submitted.
+        allow create: if isOrderParticipant(orderId)
+          && exists(/databases/$(database)/documents/order_requirements/$(orderId))
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.createdAt is timestamp;
+
+        allow update, delete: if false;
+      }
+    }
+
+    // Deliveries
+    match /order_deliveries/{orderId} {
+      allow read: if isOrderParticipant(orderId);
+      allow create: if isOrderSeller(orderId)
+        && request.resource.data.orderId == orderId
+        && request.resource.data.sellerId == request.auth.uid
+        && request.resource.data.buyerId == orderParticipants(orderId).data.clientId
+        && request.resource.data.deliveredAt is timestamp;
+      allow update, delete: if false;
+    }
+
+    // Notifications
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && resource.data.toUserId == request.auth.uid;
+      allow create: if isSignedIn()
+        && request.resource.data.fromUserId == request.auth.uid
+        && request.resource.data.toUserId is string
+        && request.resource.data.orderId is string
+        && isOrderParticipant(request.resource.data.orderId)
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.read is bool;
+
+      // Allow recipient to mark as read.
+      allow update: if isSignedIn()
+        && resource.data.toUserId == request.auth.uid
+        && request.resource.data.toUserId == resource.data.toUserId
+        && request.resource.data.fromUserId == resource.data.fromUserId
+        && request.resource.data.orderId == resource.data.orderId
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.message == resource.data.message
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.read == true;
+
+      allow delete: if false;
+    }
+
+    // Payment release / completion records
+    match /transactions/{orderId} {
+      allow read: if isOrderParticipant(orderId);
+      allow create: if isOrderBuyer(orderId)
+        && orderParticipants(orderId).data.orderStatus == 'Completed'
+        && request.resource.data.orderId == orderId
+        && request.resource.data.buyerId == request.auth.uid
+        && request.resource.data.sellerId == orderParticipants(orderId).data.sellerId
+        && request.resource.data.amountRupees == orderParticipants(orderId).data.amountRupees
+        && request.resource.data.type == 'payment_release'
+        && request.resource.data.createdAt is timestamp;
+      allow update, delete: if false;
+    }
+
+    match /wallet_transactions/{id} {
+      allow read: if isSignedIn() && resource.data.sellerId == request.auth.uid;
+      allow create: if isOrderBuyer(request.resource.data.orderId)
+        && orderParticipants(request.resource.data.orderId).data.orderStatus == 'Completed'
+        && request.resource.data.id == id
+        && id == (request.resource.data.sellerId + '_' + request.resource.data.orderId)
+        && request.resource.data.sellerId == orderParticipants(request.resource.data.orderId).data.sellerId
+        && request.resource.data.amountRupees == orderParticipants(request.resource.data.orderId).data.amountRupees
+        && request.resource.data.direction == 'credit'
+        && request.resource.data.createdAt is timestamp;
+      allow update, delete: if false;
+    }
+
+    match /invoices/{orderId} {
+      allow read: if isOrderParticipant(orderId);
+      allow create: if isOrderBuyer(orderId)
+        && orderParticipants(orderId).data.orderStatus == 'Completed'
+        && request.resource.data.orderId == orderId
+        && request.resource.data.buyerId == request.auth.uid
+        && request.resource.data.sellerId == orderParticipants(orderId).data.sellerId
+        && request.resource.data.amountRupees == orderParticipants(orderId).data.amountRupees
+        && request.resource.data.createdAt is timestamp;
       allow update, delete: if false;
     }
 
@@ -224,6 +597,21 @@ service cloud.firestore {
         && request.resource.data.serviceId == resource.data.serviceId
         && request.resource.data.createdAt == resource.data.createdAt
         && isValidServiceWrite(serviceId);
+      allow delete: if false;
+    }
+
+    // Gigs
+    // - Each gig document is owned by a seller (freelancer)
+    // - Readable by any authenticated user (to show listings)
+    match /gigs/{gigId} {
+      allow read: if isSignedIn();
+      allow create: if isValidGigWrite(gigId);
+      allow update: if isSignedIn()
+        && resource.data.seller_id == request.auth.uid
+        && request.resource.data.seller_id == resource.data.seller_id
+        && request.resource.data.gig_id == resource.data.gig_id
+        && request.resource.data.createdAt == resource.data.createdAt
+        && isValidGigWrite(gigId);
       allow delete: if false;
     }
 

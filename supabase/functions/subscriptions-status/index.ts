@@ -3,18 +3,53 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { withCors } from "../_shared/cors.ts";
 import { verifyFirebaseIdToken } from "../_shared/firebaseAuth.ts";
 
+function json(status: number, body: any) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: withCors({ "Content-Type": "application/json" }),
+  });
+}
+
+function normalizeMessage(e: unknown): string {
+  if (typeof (e as any)?.message === "string") return String((e as any).message);
+  if (e instanceof Error) return e.message;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
+function pickStatusFromErrorMessage(message: string): number {
+  const m = String(message || "").toLowerCase();
+  if (!m) return 500;
+
+  // Auth / token problems should be 401.
+  if (
+    m.includes("missing token") ||
+    m.includes("unauthorized") ||
+    m.includes("jwt") ||
+    m.includes("audience") ||
+    m.includes("issuer") ||
+    m.includes("token") && m.includes("uid")
+  ) {
+    return 401;
+  }
+
+  // Server misconfig / schema issues should be 500.
+  if (m.includes("missing supabase env") || m.includes("missing firebase_project_id")) return 500;
+  if (m.includes("relation") && m.includes("does not exist")) return 500;
+
+  return 400;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: withCors() });
   }
 
   try {
-    if (req.method !== "GET") {
-      return new Response(JSON.stringify({ error: "Method not allowed" }), {
-        status: 405,
-        headers: withCors({ "Content-Type": "application/json" }),
-      });
-    }
+    if (req.method !== "GET") return json(405, { error: "Method not allowed" });
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -25,10 +60,7 @@ Deno.serve(async (req) => {
 
     const authHeader = req.headers.get("x-firebase-token") || req.headers.get("authorization");
     if (!authHeader) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: withCors({ "Content-Type": "application/json" }),
-      });
+      return json(401, { error: "Unauthorized: missing Firebase token" });
     }
 
     const verified = await verifyFirebaseIdToken(authHeader, firebaseProjectId);
@@ -48,20 +80,21 @@ Deno.serve(async (req) => {
     const endMs = data?.current_period_end ? Date.parse(String(data.current_period_end)) : NaN;
     const isActive = Boolean(data && data.status === "active" && Number.isFinite(endMs) && endMs > now);
 
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        active: isActive,
-        plan: isActive ? (data?.plan || "pro") : null,
-        currentPeriodEnd: data?.current_period_end || null,
-      }),
-      { headers: withCors({ "Content-Type": "application/json" }) },
-    );
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    return new Response(JSON.stringify({ error: message || "Unknown error" }), {
-      status: 400,
-      headers: withCors({ "Content-Type": "application/json" }),
+    return json(200, {
+      ok: true,
+      active: isActive,
+      plan: isActive ? (data?.plan || "pro") : null,
+      currentPeriodEnd: data?.current_period_end || null,
     });
+  } catch (e) {
+    const message = normalizeMessage(e) || "Unknown error";
+    const status = pickStatusFromErrorMessage(message);
+    const hint = message.toLowerCase().includes("relation") && message.toLowerCase().includes("does not exist")
+      ? "Database table missing. Apply Supabase migrations (supabase/migrations) to the linked project."
+      : message.toLowerCase().includes("audience") || message.toLowerCase().includes("issuer")
+        ? "Firebase token verification failed. Confirm the Edge Function secret FIREBASE_PROJECT_ID matches your Firebase project id (e.g. 'gigfl0w')."
+        : "";
+
+    return json(status, { error: hint ? `${message} (${hint})` : message });
   }
 });

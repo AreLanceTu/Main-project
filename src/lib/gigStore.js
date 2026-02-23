@@ -29,6 +29,11 @@ export function upsertStoredGig(gig) {
   const prev = listStoredGigs();
   const next = [gig, ...prev.filter((g) => String(g?.gig_id) !== String(gig.gig_id))];
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  try {
+    window.dispatchEvent(new CustomEvent("gigflow:gigs:changed"));
+  } catch {
+    // ignore
+  }
   return gig;
 }
 
@@ -37,4 +42,9 @@ export function removeStoredGig(gigId) {
   const prev = listStoredGigs();
   const next = prev.filter((g) => String(g?.gig_id) !== String(gigId));
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  try {
+    window.dispatchEvent(new CustomEvent("gigflow:gigs:changed"));
+  } catch {
+    // ignore
+  }
 }

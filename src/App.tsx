@@ -21,6 +21,8 @@ import Gig from "./pages/Gig";
 import Checkout from "./pages/Checkout";
 import OrderConfirmation from "./pages/OrderConfirmation";
 import MyOrders from "./pages/MyOrders";
+import OrderRequirements from "./pages/OrderRequirements";
+import OrderChat from "./pages/OrderChat";
 import JobPosts from "./pages/JobPosts";
 import JobPostDetails from "./pages/JobPostDetails";
 import NotFound from "./pages/NotFound";
@@ -125,6 +127,23 @@ const App = () => (
               element={
                 <AuthGuard>
                   <MyOrders />
+                </AuthGuard>
+              }
+            />
+
+            <Route
+              path="/orders/:orderId/requirements"
+              element={
+                <AuthGuard>
+                  <OrderRequirements />
+                </AuthGuard>
+              }
+            />
+            <Route
+              path="/orders/:orderId/chat"
+              element={
+                <AuthGuard>
+                  <OrderChat />
                 </AuthGuard>
               }
             />

@@ -1,4 +1,5 @@
 import { auth } from "@/firebase";
+import { onAuthStateChanged, type User } from "firebase/auth";
 
 export function getFunctionsBaseUrl(): string {
   const explicit = import.meta.env.VITE_SUPABASE_FUNCTIONS_URL;
@@ -27,7 +28,40 @@ export function getFunctionsBaseUrl(): string {
 }
 
 export async function getFirebaseIdToken(): Promise<string> {
-  const user = auth.currentUser;
+  const existing = auth.currentUser;
+  if (existing) return await existing.getIdToken();
+
+  // On some pages we try to fetch signed URLs immediately on mount.
+  // Firebase Auth may not have hydrated currentUser yet, even if the
+  // user is signed in. Wait briefly for the auth state to initialize.
+  const user = await new Promise<User | null>((resolve) => {
+    let settled = false;
+
+    const timeout = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(auth.currentUser);
+    }, 1500);
+
+    const unsub = onAuthStateChanged(
+      auth,
+      (u) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        unsub();
+        resolve(u);
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        unsub();
+        resolve(null);
+      },
+    );
+  });
+
   if (!user) throw new Error("Not signed in");
   return await user.getIdToken();
 }

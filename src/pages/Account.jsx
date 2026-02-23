@@ -21,6 +21,7 @@ import { getUserRole } from "@/auth/role";
 import { supabase } from "@/supabase";
 import { isValidUsername, normalizeUsername } from "@/lib/userProfile";
 import { openRazorpayCheckout, verifyRazorpayPayment } from "@/lib/payments";
+import { storePaymentInFirestore } from "@/lib/paymentFirestore";
 import { getMySubscriptionStatus } from "@/lib/subscriptions";
 import { getMyPaymentOrders } from "@/lib/paymentOrders";
 
@@ -187,6 +188,32 @@ export default function Account() {
 
       const verify = await verifyRazorpayPayment({ orderId, paymentId, signature });
       if (!verify?.ok) throw new Error(verify?.error || "Payment verification failed");
+
+      // Store payment details in Firestore (Payments Collection).
+      // Best-effort: don't block a successful payment flow.
+      try {
+        await storePaymentInFirestore({
+          paymentId,
+          orderId,
+          amountRupees: 800,
+          currency: "INR",
+          purpose: "Pro subscription (₹800)",
+          status: "Paid",
+          quantityTotal: 30,
+          quantityUsed: 0,
+          notes: {
+            purchase_type: "subscription",
+            plan: "pro",
+            duration_days: 30,
+          },
+          related: {
+            purchaseType: "subscription",
+            plan: "pro",
+          },
+        });
+      } catch (writeErr) {
+        console.error("Failed to write Firestore payment", writeErr);
+      }
 
       const end = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
       await setDoc(

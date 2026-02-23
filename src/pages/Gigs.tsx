@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Helmet } from "react-helmet-async";
 import { motion } from "framer-motion";
+import { onAuthStateChanged } from "firebase/auth";
 import { Search, Filter, SlidersHorizontal, Star, Heart, Clock, ChevronDown, Grid, List } from "lucide-react";
 import Navbar from "@/components/layout/Navbar";
 import Footer from "@/components/layout/Footer";
@@ -12,6 +13,10 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Link } from "react-router-dom";
 import { getStoredGig, listStoredGigs, upsertStoredGig } from "@/lib/gigStore";
+import { migrateStoredDemoGigsToSellerUid } from "@/lib/demoGigs";
+import { getDemoSellerIdForGigId, getDemoSellerUid } from "@/lib/demoSeller";
+import { auth, db } from "@/firebase";
+import { listFirestoreGigs, type FirestoreGig } from "@/lib/firestoreGigs";
 
 interface Gig {
   id: string;
@@ -23,6 +28,7 @@ interface Gig {
     level: string;
   };
   rating: number;
+  reviews: number;
   price: number;
   deliveryTime: string;
   category: string;
@@ -30,7 +36,7 @@ interface Gig {
 }
 
 type GigItem = Gig & {
-  source: "stored" | "base";
+  source: "stored" | "firestore" | "base";
 };
 
 type StoredService = {
@@ -44,7 +50,10 @@ type StoredGig = {
   gig_id: string;
   title: string;
   cover_image_url: string;
+  category?: string;
   seller_id: string;
+  cover_bucket?: string;
+  cover_path?: string;
   services?: StoredService[];
   promoted?: boolean;
   promoted_at?: string;
@@ -177,8 +186,16 @@ const Gigs = () => {
   const searchQuery = searchParams.get("search") || "";
   const category = searchParams.get("category") || "";
 
+  const demoSellerUid = useMemo(() => getDemoSellerUid(), []);
+
+  useEffect(() => {
+    if (!demoSellerUid) return;
+    migrateStoredDemoGigsToSellerUid(demoSellerUid);
+  }, [demoSellerUid]);
+
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [sortBy, setSortBy] = useState("recommended");
+  const [page, setPage] = useState(1);
 
   const baseGigs: GigItem[] = [
     {
@@ -255,9 +272,43 @@ const Gigs = () => {
     },
   ];
 
+  const [storedGigList, setStoredGigList] = useState<StoredGig[]>(() => listStoredGigs() as StoredGig[]);
+  const [firestoreGigList, setFirestoreGigList] = useState<FirestoreGig[]>([]);
+
+  useEffect(() => {
+    function refresh() {
+      setStoredGigList(listStoredGigs() as StoredGig[]);
+    }
+
+    refresh();
+    window.addEventListener("gigflow:gigs:changed", refresh);
+    return () => window.removeEventListener("gigflow:gigs:changed", refresh);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const unsub = onAuthStateChanged(auth, async (u) => {
+      if (!u) {
+        if (!cancelled) setFirestoreGigList([]);
+        return;
+      }
+
+      try {
+        const gigs = await listFirestoreGigs(db, { limitCount: 100 });
+        if (!cancelled) setFirestoreGigList(gigs);
+      } catch {
+        if (!cancelled) setFirestoreGigList([]);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, []);
+
   const storedGigs = useMemo((): GigItem[] => {
-    const list = listStoredGigs() as StoredGig[];
-    return list.map((g) => {
+    return storedGigList.map((g) => {
       const services = Array.isArray(g.services) ? g.services : [];
       const prices = services.map((s) => Number(s.price)).filter((p) => Number.isFinite(p) && p > 0);
       const startingAt = prices.length ? Math.min(...prices) : 0;
@@ -271,6 +322,8 @@ const Gigs = () => {
 
       const promoted = Boolean((g as any)?.promoted);
 
+      const category = String((g as any)?.category || "New");
+
       return {
         source: "stored",
         id: String(g.gig_id),
@@ -281,11 +334,42 @@ const Gigs = () => {
         reviews: 0,
         price: startingAt,
         deliveryTime: minDays ? `${minDays} day${minDays === 1 ? "" : "s"}` : "",
-        category: "New",
+        category,
         promoted,
       } satisfies GigItem;
     });
-  }, []);
+  }, [storedGigList]);
+
+  const firestoreGigs = useMemo((): GigItem[] => {
+    return firestoreGigList.map((g) => {
+      const services = Array.isArray(g.services) ? g.services : [];
+      const prices = services.map((s: any) => Number(s?.price)).filter((p) => Number.isFinite(p) && p > 0);
+      const startingAt = prices.length ? Math.min(...prices) : 0;
+
+      const deliveryDays = services
+        .map((s: any) => Number(s?.delivery_time_days))
+        .filter((d) => Number.isFinite(d) && d > 0);
+      const minDays = deliveryDays.length ? Math.min(...deliveryDays) : 0;
+
+      const sellerShort = g.seller_id ? String(g.seller_id).slice(0, 8) : "Seller";
+      const promoted = Boolean((g as any)?.promoted);
+      const category = String((g as any)?.category || "New");
+
+      return {
+        source: "firestore",
+        id: String(g.gig_id),
+        title: String(g.title || ""),
+        image: String(g.cover_image_url || ""),
+        seller: { name: sellerShort, avatar: "", level: "New" },
+        rating: 0,
+        reviews: 0,
+        price: startingAt,
+        deliveryTime: minDays ? `${minDays} day${minDays === 1 ? "" : "s"}` : "",
+        category,
+        promoted,
+      } satisfies GigItem;
+    });
+  }, [firestoreGigList]);
 
   function ensureGigIsStored(gig: GigItem) {
     if (gig.source !== "base") return;
@@ -324,14 +408,14 @@ const Gigs = () => {
       gig_id: String(gig.id),
       title: String(gig.title || ""),
       cover_image_url: String(gig.image || ""),
-      seller_id: `demo_seller_${gig.id}`,
+      seller_id: getDemoSellerIdForGigId(gig.id),
       services,
       description_html: buildDemoGigDescriptionHtml({ title: gig.title, category: gig.category }),
     });
   }
 
   const visibleGigs = useMemo((): GigItem[] => {
-    let list = [...storedGigs, ...baseGigs];
+    let list = [...storedGigs, ...firestoreGigs, ...baseGigs];
 
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
@@ -352,7 +436,11 @@ const Gigs = () => {
       if (sortBy === "price-high") return b.price - a.price;
       if (sortBy === "newest") {
         // Stored gigs are effectively "newer" than base demo items.
-        if (a.source !== b.source) return a.source === "stored" ? -1 : 1;
+        if (a.source !== b.source) {
+          if (a.source === "base") return 1;
+          if (b.source === "base") return -1;
+          return a.source === "stored" ? -1 : 1;
+        }
         return 0;
       }
       if (sortBy === "best-selling") {
@@ -365,7 +453,25 @@ const Gigs = () => {
     });
 
     return sorted;
-  }, [baseGigs, storedGigs, searchQuery, category, sortBy]);
+  }, [baseGigs, storedGigs, firestoreGigs, searchQuery, category, sortBy]);
+
+  const pageSize = 9;
+  const totalPages = Math.max(1, Math.ceil(visibleGigs.length / pageSize));
+  const currentPage = Math.max(1, Math.min(page, totalPages));
+  const pagedGigs = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return visibleGigs.slice(start, start + pageSize);
+  }, [currentPage, visibleGigs]);
+
+  useEffect(() => {
+    // Reset pagination when filters/sort change.
+    setPage(1);
+  }, [searchQuery, category, sortBy]);
+
+  useEffect(() => {
+    // Clamp page when list size changes.
+    if (page !== currentPage) setPage(currentPage);
+  }, [currentPage, page]);
 
   const categories = [
     "All Categories",
@@ -554,7 +660,7 @@ const Gigs = () => {
                     : "grid-cols-1"
                 }`}
               >
-                {visibleGigs.map((gig, index) => (
+                {pagedGigs.map((gig, index) => (
                   <motion.div
                     key={gig.id}
                     initial={{ opacity: 0, y: 20 }}
@@ -570,7 +676,7 @@ const Gigs = () => {
                           viewMode === "list" ? "w-full aspect-[4/3] sm:w-48 sm:aspect-auto shrink-0" : "aspect-[4/3]"
                         }`}>
                           <img
-                            src={gig.image}
+                            src={gig.image || "/mock-service-banner.svg"}
                             alt={gig.title}
                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                           />
@@ -633,13 +739,40 @@ const Gigs = () => {
 
               {/* Pagination */}
               <div className="flex items-center justify-center gap-2 mt-12">
-                <Button variant="outline" disabled>
+                <Button
+                  variant="outline"
+                  disabled={currentPage <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                >
                   Previous
                 </Button>
-                <Button variant="default">1</Button>
-                <Button variant="outline">2</Button>
-                <Button variant="outline">3</Button>
-                <Button variant="outline">Next</Button>
+                <Button
+                  variant={currentPage === 1 ? "default" : "outline"}
+                  onClick={() => setPage(1)}
+                >
+                  1
+                </Button>
+                <Button
+                  variant={currentPage === 2 ? "default" : "outline"}
+                  disabled={totalPages < 2}
+                  onClick={() => setPage(2)}
+                >
+                  2
+                </Button>
+                <Button
+                  variant={currentPage === 3 ? "default" : "outline"}
+                  disabled={totalPages < 3}
+                  onClick={() => setPage(3)}
+                >
+                  3
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={currentPage >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                >
+                  Next
+                </Button>
               </div>
             </div>
           </div>

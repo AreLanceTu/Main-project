@@ -1,8 +1,11 @@
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Star, Heart, Clock, ArrowRight } from "lucide-react";
+import { useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { getStoredGig, upsertStoredGig } from "@/lib/gigStore";
+import { migrateStoredDemoGigsToSellerUid } from "@/lib/demoGigs";
+import { getDemoSellerIdForGigId, getDemoSellerUid } from "@/lib/demoSeller";
 
 interface Gig {
   id: string;
@@ -45,7 +48,7 @@ function ensureFeaturedGigIsStored(gig: Gig) {
     gig_id: String(gig.id),
     title: String(gig.title || ""),
     cover_image_url: String(gig.image || ""),
-    seller_id: `demo_seller_${gig.id}`,
+    seller_id: getDemoSellerIdForGigId(gig.id),
     description_html: buildDemoDescriptionHtml({ title: gig.title, category: gig.category }),
     services: [
       {
@@ -74,6 +77,13 @@ function ensureFeaturedGigIsStored(gig: Gig) {
 }
 
 const FeaturedGigsSection = () => {
+  const demoSellerUid = useMemo(() => getDemoSellerUid(), []);
+
+  useEffect(() => {
+    if (!demoSellerUid) return;
+    migrateStoredDemoGigsToSellerUid(demoSellerUid);
+  }, [demoSellerUid]);
+
   const featuredGigs: Gig[] = [
     {
       id: "1",

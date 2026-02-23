@@ -25,6 +25,9 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getStoredGig } from "@/lib/gigStore";
+import { resolveGigCoverUrl } from "@/lib/gigCovers";
+import { db } from "@/firebase";
+import { getFirestoreGig } from "@/lib/firestoreGigs";
 import { BadgeCheck, Clock, ShieldCheck, Star } from "lucide-react";
 
 type StoredService = {
@@ -39,6 +42,8 @@ type StoredGig = {
   gig_id: string;
   title: string;
   cover_image_url: string;
+  cover_bucket?: string;
+  cover_path?: string;
   seller_id: string;
   description_html?: string;
   services?: StoredService[];
@@ -53,7 +58,8 @@ const Gig = () => {
   const [selectedService, setSelectedService] = useState<StoredService | null>(null);
   const [activeBlendyId, setActiveBlendyId] = useState<string | null>(null);
 
-  const gig = (getStoredGig(id || "") as StoredGig | null) || null;
+  const [gig, setGig] = useState<StoredGig | null>(() => (getStoredGig(id || "") as StoredGig | null) || null);
+  const [resolvedCoverUrl, setResolvedCoverUrl] = useState<string>(gig?.cover_image_url || "");
   const services = gig?.services || [];
   const startingPrice = services.length
     ? Math.min(...services.map((s) => Number(s.price) || Number.POSITIVE_INFINITY))
@@ -70,7 +76,54 @@ const Gig = () => {
   const minDeliveryDays = services.length
     ? Math.min(...services.map((s) => Number(s.delivery_time_days) || Number.POSITIVE_INFINITY))
     : null;
-  const heroImageSrc = gig?.cover_image_url || "/mock-service-banner.svg";
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      const gigId = String(id || "").trim();
+      if (!gigId) {
+        if (!cancelled) setGig(null);
+        return;
+      }
+
+      const fromLocal = (getStoredGig(gigId) as StoredGig | null) || null;
+      if (fromLocal) {
+        if (!cancelled) setGig(fromLocal);
+        return;
+      }
+
+      try {
+        const fromFs = await getFirestoreGig(db, gigId);
+        if (!cancelled) setGig((fromFs as any) || null);
+      } catch {
+        if (!cancelled) setGig(null);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+  useEffect(() => {
+    let cancelled = false;
+    async function run() {
+      if (!gig) {
+        if (!cancelled) setResolvedCoverUrl("");
+        return;
+      }
+
+      const url = await resolveGigCoverUrl(gig).catch(() => null);
+      if (!cancelled) setResolvedCoverUrl(url || "");
+    }
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [gig?.gig_id]);
+
+  const heroImageSrc = resolvedCoverUrl || "/mock-service-banner.svg";
   const sellerName = gig?.seller_id
     ? `Seller ${String(gig.seller_id).slice(0, 8)}`
     : "Verified seller";

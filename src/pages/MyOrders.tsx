@@ -2,9 +2,11 @@ import { Helmet } from "react-helmet-async";
 import { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import { collection, getDocs, limit, query, where, type Timestamp } from "firebase/firestore";
+import { useNavigate } from "react-router-dom";
 
 import Navbar from "@/components/layout/Navbar";
 import Footer from "@/components/layout/Footer";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -23,8 +25,9 @@ type OrderDoc = {
   clientId: string;
   serviceId: string;
   paymentStatus: "Paid" | "Failed" | string;
-  orderStatus: "Pending" | "Completed" | string;
+  orderStatus: "Pending" | "In Progress" | "Delivered" | "Revision" | "Completed" | string;
   createdAt?: Timestamp | null;
+  requirementsSubmitted?: boolean;
 };
 
 function formatCreatedAt(ts?: Timestamp | null): string {
@@ -38,6 +41,7 @@ function formatCreatedAt(ts?: Timestamp | null): string {
 }
 
 export default function MyOrders() {
+  const navigate = useNavigate();
   const [uid, setUid] = useState<string | null>(() => auth.currentUser?.uid ?? null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -126,6 +130,7 @@ export default function MyOrders() {
                           <TableHead>Status</TableHead>
                           <TableHead>Payment</TableHead>
                           <TableHead>Created</TableHead>
+                          <TableHead className="text-right">Action</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -143,6 +148,15 @@ export default function MyOrders() {
                             </TableCell>
                             <TableCell className="text-sm text-muted-foreground">
                               {formatCreatedAt(o.createdAt)}
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => navigate(`/orders/${encodeURIComponent(o.orderId)}/requirements`)}
+                              >
+                                Requirements / Chat
+                              </Button>
                             </TableCell>
                           </TableRow>
                         ))}

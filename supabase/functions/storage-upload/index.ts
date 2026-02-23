@@ -34,6 +34,37 @@ function json(status: number, body: any) {
   });
 }
 
+async function ensureBucketExists(supabase: any, bucket: string) {
+  const name = normalize(bucket);
+  if (!name) throw new Error("Missing bucket");
+
+  const shouldBePublic = name === "uploads" || name === "gig-images";
+
+  const { data: buckets, error: listError } = await supabase.storage.listBuckets();
+  if (!listError && Array.isArray(buckets)) {
+    const existing = buckets.find((b: any) => b?.name === name);
+    if (existing) {
+      // Best-effort: if the bucket exists but visibility doesn't match what we need, update it.
+      try {
+        const isPublic = Boolean((existing as any)?.public);
+        if (isPublic !== shouldBePublic) {
+          await supabase.storage.updateBucket(name, { public: shouldBePublic });
+        }
+      } catch {
+        // ignore (updateBucket may not be available or permissions may block)
+      }
+      return;
+    }
+  }
+
+  const { error: createError } = await supabase.storage.createBucket(name, { public: shouldBePublic });
+  if (createError) {
+    // If a concurrent request created it, ignore "already exists".
+    const msg = String((createError as any)?.message || "");
+    if (!msg.toLowerCase().includes("already")) throw createError;
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: withCors() });
@@ -71,6 +102,9 @@ Deno.serve(async (req: Request) => {
 
     const supabase = createClient(supabaseUrl, serviceRoleKey);
 
+    // Make uploads more robust: auto-create the bucket if it doesn't exist.
+    await ensureBucketExists(supabase, bucket);
+
     const { error: uploadError } = await supabase.storage.from(bucket).upload(path, bytes, {
       contentType,
       upsert: true,
@@ -84,7 +118,24 @@ Deno.serve(async (req: Request) => {
 
     return json(200, { bucket, path, publicUrl });
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    return json(400, { error: message || "Unknown error" });
+    const message =
+      typeof (e as any)?.message === "string"
+        ? String((e as any).message)
+        : e instanceof Error
+          ? e.message
+          : (() => {
+              try {
+                return JSON.stringify(e);
+              } catch {
+                return String(e);
+              }
+            })();
+
+    const statusCode = Number((e as any)?.statusCode || (e as any)?.status) || 400;
+    const extraHint = String(message || "").toLowerCase().includes("bucket")
+      ? " Bucket not found: create it in Supabase Storage for the SAME project configured in this Edge Function (check SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)."
+      : "";
+
+    return json(statusCode, { error: `${message || "Unknown error"}${extraHint}`.trim() });
   }
 });

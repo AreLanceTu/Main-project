@@ -59,6 +59,7 @@ import {
 import MessagesPage from "@/pages/MessagesPage";
 import { isValidUsername, normalizeUsername } from "@/lib/userProfile";
 import { openRazorpayCheckout, verifyRazorpayPayment } from "@/lib/payments";
+import { storePaymentInFirestore } from "@/lib/paymentFirestore";
 import { useToast } from "@/hooks/use-toast";
 
 function formatCurrency(amount) {
@@ -114,7 +115,7 @@ export default function ClientDashboard() {
   const [usernameError, setUsernameError] = useState(null);
   const [usernameSuccess, setUsernameSuccess] = useState(null);
 
-  const [activeTab, setActiveTab] = useState("projects");
+  const [activeTab, setActiveTab] = useState("orders");
 
   const [postJobOpen, setPostJobOpen] = useState(false);
   const [jobDraft, setJobDraft] = useState(() => ({
@@ -125,31 +126,10 @@ export default function ClientDashboard() {
   }));
 
   const [projects, setProjects] = useState(() => [
-    {
-      id: "prj-1",
-      title: "Landing page redesign",
-      freelancer: "Aanya",
-      status: "In Progress",
-      budget: 900,
-      dueISO: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: "prj-2",
-      title: "SEO blog content (10 posts)",
-      freelancer: "Rohan",
-      status: "Submitted",
-      budget: 450,
-      dueISO: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: "prj-3",
-      title: "Mobile app bugfix sprint",
-      freelancer: "Meera",
-      status: "Completed",
-      budget: 700,
-      dueISO: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
-    },
+    // Replaced by real orders loaded from Firestore.
   ]);
+
+  const [orders, setOrders] = useState(() => []);
 
   const [proposals, setProposals] = useState(() => [
     {
@@ -277,6 +257,31 @@ export default function ClientDashboard() {
         throw new Error(verify?.error || "Payment verification failed");
       }
 
+      // Store payment details in Firestore (Payments Collection).
+      // Best-effort: don't block a successful payment flow.
+      try {
+        await storePaymentInFirestore({
+          paymentId,
+          orderId,
+          amountRupees,
+          currency: "INR",
+          purpose: `Invoice ${invoice.id} (${invoice.type})`,
+          status: "Paid",
+          quantityTotal: 1,
+          quantityUsed: 0,
+          notes: {
+            invoice_id: invoice.id,
+            invoice_type: invoice.type,
+          },
+          related: {
+            invoiceId: invoice.id,
+            invoiceType: invoice.type,
+          },
+        });
+      } catch (writeErr) {
+        console.error("Failed to write Firestore payment", writeErr);
+      }
+
       setInvoices((prev) =>
         prev.map((x) => (x.id === invoice.id ? { ...x, status: "Paid" } : x)),
       );
@@ -315,6 +320,90 @@ export default function ClientDashboard() {
         console.error("Failed to load user profile", err);
         setUsername(null);
         setUsernameDraft("");
+      },
+    );
+
+    return unsub;
+  }, [userUid]);
+
+  useEffect(() => {
+    if (!userUid) {
+      setOrders([]);
+      setProjects([]);
+      return undefined;
+    }
+
+    const q = query(collection(db, "orders"), where("clientId", "==", userUid), limit(50));
+
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const items = snap.docs.map((d) => {
+          const data = d.data() || {};
+          const orderId = String(data.orderId || d.id);
+          const orderStatus = String(data.orderStatus || "Pending");
+
+          let createdAtMs = 0;
+          try {
+            const createdAsDate = data.createdAt?.toDate?.();
+            createdAtMs = createdAsDate ? createdAsDate.getTime() : 0;
+          } catch {
+            createdAtMs = 0;
+          }
+
+          let dueISO = null;
+          try {
+            const dueAsDate = data.dueAt?.toDate?.();
+            dueISO = dueAsDate ? dueAsDate.toISOString() : null;
+          } catch {
+            dueISO = null;
+          }
+
+          const amountRupees = Number(data.amountRupees || 0);
+          const paymentStatus = String(data.paymentStatus || "Paid");
+          const requirementsSubmitted = Boolean(data.requirementsSubmitted);
+          const sellerId = String(data.sellerId || "");
+          const serviceId = String(data.serviceId || "");
+
+          return {
+            id: orderId,
+            orderStatus,
+            paymentStatus,
+            amountRupees,
+            requirementsSubmitted,
+            sellerId,
+            serviceId,
+            createdAtMs,
+            dueISO,
+          };
+        });
+
+        items.sort((a, b) => {
+          const aMs = Number(a.createdAtMs) || 0;
+          const bMs = Number(b.createdAtMs) || 0;
+          if (aMs !== bMs) return bMs - aMs;
+          return String(b.id).localeCompare(String(a.id));
+        });
+
+        setOrders(items);
+
+        // Keep existing UI intact by mapping orders into the old "projects" view model.
+        setProjects(
+          items.map((o) => ({
+            id: o.id,
+            title: o.serviceId ? `Order for ${o.serviceId}` : `Order ${o.id}`,
+            freelancer: o.sellerId ? `${o.sellerId.slice(0, 8)}…` : "—",
+            status: o.orderStatus,
+            budget: o.amountRupees,
+            dueISO: o.dueISO,
+            requirementsSubmitted: o.requirementsSubmitted,
+          })),
+        );
+      },
+      (err) => {
+        console.error("Failed to load orders", err);
+        setOrders([]);
+        setProjects([]);
       },
     );
 
@@ -397,12 +486,19 @@ export default function ClientDashboard() {
   }, [userUid]);
 
   const overview = useMemo(() => {
-    const activeProjects = projects.filter((p) => ["in progress", "active", "submitted"].includes(String(p.status).toLowerCase())).length;
+    const activeProjects = orders.filter((o) => {
+      const s = String(o.orderStatus || "").toLowerCase();
+      return ["pending", "in progress", "revision", "delivered"].includes(s);
+    }).length;
     const openProposals = proposals.filter((p) => String(p.status).toLowerCase() === "open").length;
     const unreadMessages = unreadChatsCount;
-    const totalSpend = projects.reduce((sum, p) => sum + (p.status === "Completed" ? p.budget : 0), 0) + invoices
-      .filter((i) => i.status === "Paid")
-      .reduce((sum, i) => sum + i.amount, 0);
+    const totalSpend =
+      orders
+        .filter((o) => String(o.paymentStatus || "").toLowerCase() === "paid")
+        .reduce((sum, o) => sum + (Number(o.amountRupees) || 0), 0) +
+      invoices
+        .filter((i) => i.status === "Paid")
+        .reduce((sum, i) => sum + i.amount, 0);
 
     return {
       activeProjects,
@@ -520,7 +616,7 @@ export default function ClientDashboard() {
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
               {[
                 {
-                  label: "Active Projects",
+                  label: "Active Orders",
                   value: overview.activeProjects,
                   icon: Briefcase,
                 },
@@ -564,18 +660,19 @@ export default function ClientDashboard() {
             <div className="grid gap-4 lg:grid-cols-3">
               <Card className="lg:col-span-2 rounded-2xl shadow-card border-border/70">
                 <CardHeader>
-                  <CardTitle className="text-base">Projects Snapshot</CardTitle>
-                  <CardDescription>Recent projects and their current status</CardDescription>
+                  <CardTitle className="text-base">Orders Snapshot</CardTitle>
+                  <CardDescription>Recent orders and their current status</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <div className="-mx-4 overflow-x-auto px-4">
                     <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>Project Name</TableHead>
-                        <TableHead className="hidden sm:table-cell">Freelancer Name</TableHead>
+                        <TableHead>Order</TableHead>
+                        <TableHead className="hidden sm:table-cell">Seller</TableHead>
                         <TableHead>Status</TableHead>
                         <TableHead className="text-right">Budget</TableHead>
+                        <TableHead className="text-right">Action</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -597,6 +694,17 @@ export default function ClientDashboard() {
                             })()}
                           </TableCell>
                           <TableCell className="text-right">{formatInr(p.budget)}</TableCell>
+                          <TableCell className="text-right">
+                            {String(p.status) === "Pending" && !p.requirementsSubmitted ? (
+                              <Button size="sm" onClick={() => navigate(`/orders/${p.id}/requirements`)}>
+                                Requirements
+                              </Button>
+                            ) : (
+                              <Button size="sm" variant="outline" onClick={() => navigate(`/orders/${p.id}/chat`)}>
+                                Chat
+                              </Button>
+                            )}
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -638,9 +746,9 @@ export default function ClientDashboard() {
           <Tabs value={activeTab} onValueChange={setActiveTab}>
             <div className="-mx-4 max-w-full overflow-x-auto px-4 no-scrollbar pt-1">
               <TabsList className="min-w-max justify-start gap-1 whitespace-nowrap">
-                <TabsTrigger className="shrink-0 px-2 sm:px-3" value="projects">
-                  <span className="hidden sm:inline">Projects & Orders</span>
-                  <span className="sm:hidden">Projects</span>
+                <TabsTrigger className="shrink-0 px-2 sm:px-3" value="orders">
+                  <span className="hidden sm:inline">Orders</span>
+                  <span className="sm:hidden">Orders</span>
                 </TabsTrigger>
                 <TabsTrigger className="shrink-0 px-2 sm:px-3" value="proposals">Proposals</TabsTrigger>
                 <TabsTrigger className="shrink-0 px-2 sm:px-3" value="messages">Messages</TabsTrigger>
@@ -660,22 +768,23 @@ export default function ClientDashboard() {
               </TabsList>
             </div>
 
-            <TabsContent value="projects" className="mt-6 space-y-4">
+            <TabsContent value="orders" className="mt-6 space-y-4">
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">Projects & orders</CardTitle>
-                  <CardDescription>Status, budgets, and due dates</CardDescription>
+                  <CardTitle className="text-base">Orders</CardTitle>
+                  <CardDescription>Status, budgets, due dates, and completion</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <div className="-mx-4 overflow-x-auto px-4">
                     <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>Project</TableHead>
-                        <TableHead className="hidden sm:table-cell">Freelancer</TableHead>
+                        <TableHead>Order</TableHead>
+                        <TableHead className="hidden sm:table-cell">Seller</TableHead>
                         <TableHead>Status</TableHead>
                         <TableHead className="hidden md:table-cell">Due</TableHead>
                         <TableHead className="text-right">Budget</TableHead>
+                        <TableHead className="text-right">Action</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -686,7 +795,9 @@ export default function ClientDashboard() {
                             <div className="mt-1 text-xs text-muted-foreground sm:hidden">
                               {p.freelancer}
                               <span className="mx-1">·</span>
-                              due {new Date(p.dueISO).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                              {p.dueISO
+                                ? `due ${new Date(p.dueISO).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`
+                                : "no deadline"}
                             </div>
                           </TableCell>
                           <TableCell className="hidden sm:table-cell">{p.freelancer}</TableCell>
@@ -694,13 +805,33 @@ export default function ClientDashboard() {
                             <Badge variant={statusVariant(p.status)}>{p.status}</Badge>
                           </TableCell>
                           <TableCell className="hidden md:table-cell">
-                            {new Date(p.dueISO).toLocaleDateString(undefined, {
-                              year: "numeric",
-                              month: "short",
-                              day: "numeric",
-                            })}
+                            {p.dueISO
+                              ? new Date(p.dueISO).toLocaleDateString(undefined, {
+                                  year: "numeric",
+                                  month: "short",
+                                  day: "numeric",
+                                })
+                              : "—"}
                           </TableCell>
-                          <TableCell className="text-right">{formatCurrency(p.budget)}</TableCell>
+                          <TableCell className="text-right">{formatInr(p.budget)}</TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              {String(p.status) === "Pending" && !p.requirementsSubmitted ? (
+                                <Button size="sm" onClick={() => navigate(`/orders/${p.id}/requirements`)}>
+                                  Requirements
+                                </Button>
+                              ) : (
+                                <Button size="sm" variant="outline" onClick={() => navigate(`/orders/${p.id}/chat`)}>
+                                  Open
+                                </Button>
+                              )}
+                              {String(p.status) === "Delivered" ? (
+                                <Button size="sm" onClick={() => navigate(`/orders/${p.id}/chat`)}>
+                                  Complete
+                                </Button>
+                              ) : null}
+                            </div>
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>

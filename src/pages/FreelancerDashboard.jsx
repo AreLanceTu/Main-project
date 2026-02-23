@@ -1,7 +1,16 @@
 import { Helmet } from "react-helmet-async";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
-import { doc, serverTimestamp, setDoc } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  limit,
+  onSnapshot,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+} from "firebase/firestore";
 import * as RechartsPrimitive from "recharts";
 import { useNavigate } from "react-router-dom";
 
@@ -52,10 +61,13 @@ import {
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { useToast } from "@/hooks/use-toast";
 import { getStoredGig, listStoredGigs, removeStoredGig, upsertStoredGig } from "@/lib/gigStore";
+import { resolveGigCoverUrl } from "@/lib/gigCovers";
 import { getFirebaseIdToken, getFunctionsBaseUrl } from "@/lib/functionsClient";
 import { openRazorpayCheckout, verifyRazorpayPayment } from "@/lib/payments";
+import { storePaymentInFirestore } from "@/lib/paymentFirestore";
 import { getMySubscriptionStatus } from "@/lib/subscriptions";
 import { upsertFirestoreServices } from "@/lib/services";
+import { upsertFirestoreGig } from "@/lib/firestoreGigs";
 import { supabaseUploadViaFunction } from "@/lib/supabaseStorage";
 
 function formatCurrency(amount) {
@@ -63,6 +75,15 @@ function formatCurrency(amount) {
   return new Intl.NumberFormat(undefined, {
     style: "currency",
     currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+function formatInr(amountRupees) {
+  const value = typeof amountRupees === "number" && Number.isFinite(amountRupees) ? amountRupees : 0;
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "INR",
     maximumFractionDigits: 0,
   }).format(value);
 }
@@ -215,29 +236,73 @@ export default function FreelancerDashboard() {
     ];
   });
 
-  const [orders, setOrders] = useState(() => [
-    {
-      id: "ord-1",
-      clientName: "Aarav",
-      amount: 120,
-      deadlineISO: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
-      status: "Active",
-    },
-    {
-      id: "ord-2",
-      clientName: "Meera",
-      amount: 80,
-      deadlineISO: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-      status: "Active",
-    },
-    {
-      id: "ord-3",
-      clientName: "Ishaan",
-      amount: 200,
-      deadlineISO: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
-      status: "Delivered",
-    },
-  ]);
+  const [orders, setOrders] = useState(() => []);
+
+  useEffect(() => {
+    if (!userUid) {
+      setOrders([]);
+      return undefined;
+    }
+
+    const q = query(
+      collection(db, "orders"),
+      where("sellerId", "==", userUid),
+      limit(50),
+    );
+
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const items = snap.docs.map((d) => {
+          const data = d.data() || {};
+          const orderStatus = String(data.orderStatus || "Pending");
+          const status = ["In Progress", "Revision", "Pending"].includes(orderStatus)
+            ? "Active"
+            : orderStatus === "Delivered"
+              ? "Delivered"
+              : orderStatus;
+
+          const dueTs = data.dueAt;
+          let deadlineISO = null;
+          try {
+            const asDate = dueTs?.toDate?.();
+            deadlineISO = asDate ? asDate.toISOString() : null;
+          } catch {
+            deadlineISO = null;
+          }
+
+          let createdAtMs = 0;
+          try {
+            const createdAsDate = data.createdAt?.toDate?.();
+            createdAtMs = createdAsDate ? createdAsDate.getTime() : 0;
+          } catch {
+            createdAtMs = 0;
+          }
+
+          return {
+            id: String(data.orderId || d.id),
+            clientId: String(data.clientId || ""),
+            amountRupees: Number(data.amountRupees || 0),
+            deadlineISO,
+            status,
+            orderStatus,
+            createdAtMs,
+          };
+        });
+
+        items.sort((a, b) => {
+          const aMs = Number(a.createdAtMs) || 0;
+          const bMs = Number(b.createdAtMs) || 0;
+          if (aMs !== bMs) return bMs - aMs;
+          return String(b.id).localeCompare(String(a.id));
+        });
+        setOrders(items);
+      },
+      () => setOrders([]),
+    );
+
+    return unsub;
+  }, [userUid]);
 
   const [withdrawals, setWithdrawals] = useState(() => []);
   const [withdrawalsLoading, setWithdrawalsLoading] = useState(false);
@@ -417,6 +482,32 @@ export default function FreelancerDashboard() {
         throw new Error(verify?.error || "Payment verification failed");
       }
 
+      // Store payment details in Firestore (Payments Collection).
+      // Best-effort: don't block a successful payment flow.
+      try {
+        await storePaymentInFirestore({
+          paymentId,
+          orderId,
+          amountRupees: 800,
+          currency: "INR",
+          purpose: "Pro subscription (₹800)",
+          status: "Paid",
+          quantityTotal: 30,
+          quantityUsed: 0,
+          notes: {
+            purchase_type: "subscription",
+            plan: "pro",
+            duration_days: 30,
+          },
+          related: {
+            purchaseType: "subscription",
+            plan: "pro",
+          },
+        });
+      } catch (writeErr) {
+        console.error("Failed to write Firestore payment", writeErr);
+      }
+
       // This app surfaces badges from Firebase user profile docs.
       const end = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
       await setDoc(
@@ -559,7 +650,7 @@ export default function FreelancerDashboard() {
   const earnings = useMemo(() => {
     const totalGigOrders = gigs.reduce((sum, g) => sum + (g.orders || 0), 0);
     const grossFromGigs = totalGigOrders * 60;
-    const grossFromOrders = orders.reduce((sum, o) => sum + (Number(o.amount) || 0), 0);
+    const grossFromOrders = orders.reduce((sum, o) => sum + (Number(o.amountRupees) || 0), 0);
     const gross = Math.max(grossFromGigs, grossFromOrders);
     const withdrawnCompleted = withdrawals
       .filter((w) => normalizeWithdrawalStatus(w.status) === "completed")
@@ -583,7 +674,10 @@ export default function FreelancerDashboard() {
     const now = Date.now();
     const active = orders.filter((o) => o.status === "Active");
     const delivered = orders.filter((o) => o.status === "Delivered");
-    const late = active.filter((o) => new Date(o.deadlineISO).getTime() < now);
+    const late = active.filter((o) => {
+      if (!o.deadlineISO) return false;
+      return new Date(o.deadlineISO).getTime() < now;
+    });
     return { active, delivered, late };
   }, [orders]);
 
@@ -655,10 +749,11 @@ export default function FreelancerDashboard() {
       return status === 404 || message.includes("bucket") && message.includes("not") && message.includes("found");
     }
 
-    const preferredBucket = String(import.meta.env.VITE_SUPABASE_GIG_IMAGES_BUCKET || "gig-images").trim() || "gig-images";
-    const fallbackBucket = "uploads";
+    // Default to the shared public bucket so thumbnails can load without signed URLs.
+    const preferredBucket = String(import.meta.env.VITE_SUPABASE_GIG_IMAGES_BUCKET || "uploads").trim() || "uploads";
+    const fallbackBucket = "gig-images";
 
-    const uploadedUrls = [];
+    const uploaded = [];
 
     for (const file of files) {
       if (!file) continue;
@@ -680,8 +775,11 @@ export default function FreelancerDashboard() {
           path,
           file,
         });
-        if (!res?.publicUrl) throw new Error("Could not get public URL for uploaded image");
-        uploadedUrls.push(res.publicUrl);
+        uploaded.push({
+          bucket: String(res?.bucket || preferredBucket),
+          path: String(res?.path || path),
+          publicUrl: res?.publicUrl ? String(res.publicUrl) : "",
+        });
         continue;
       } catch (e) {
         // If the preferred bucket doesn't exist, try a common fallback.
@@ -694,8 +792,11 @@ export default function FreelancerDashboard() {
           path,
           file,
         });
-        if (!res?.publicUrl) throw new Error("Could not get public URL for uploaded image");
-        uploadedUrls.push(res.publicUrl);
+        uploaded.push({
+          bucket: String(res?.bucket || fallbackBucket),
+          path: String(res?.path || path),
+          publicUrl: res?.publicUrl ? String(res.publicUrl) : "",
+        });
       } catch (e) {
         if (isBucketMissing(e)) {
           throw new Error(
@@ -707,7 +808,7 @@ export default function FreelancerDashboard() {
       }
     }
 
-    return uploadedUrls;
+    return uploaded;
   }
 
   async function upsertGig({ status }) {
@@ -723,18 +824,38 @@ export default function FreelancerDashboard() {
         .filter(Boolean);
 
       // Upload new files (if any), otherwise preserve existing cover image when editing.
-      const uploadedUrls = selectedFiles.length
+      const uploadedFiles = selectedFiles.length
         ? await uploadGigImages({ gigId, files: selectedFiles })
         : [];
 
       const existingGig = gigForm.editingGigId ? getStoredGig(gigForm.editingGigId) : null;
-      const coverUrl = uploadedUrls[0] || existingGig?.cover_image_url || "";
+
+      const coverUpload = uploadedFiles?.[0] || null;
+      const coverBucket = String(coverUpload?.bucket || existingGig?.cover_bucket || "").trim();
+      const coverPath = String(coverUpload?.path || existingGig?.cover_path || "").trim();
+
+      const coverUrl = (await resolveGigCoverUrl({
+        cover_image_url: String(coverUpload?.publicUrl || existingGig?.cover_image_url || ""),
+        cover_bucket: coverBucket,
+        cover_path: coverPath,
+      }).catch(() => null)) || "";
 
       // Update previews to use the real URLs (so the UI stays consistent after upload).
-      if (uploadedUrls.length) {
+      if (uploadedFiles.length) {
+        const previewUrls = await Promise.all(
+          uploadedFiles.map(async (f) => {
+            const url = await resolveGigCoverUrl({
+              cover_image_url: String(f?.publicUrl || ""),
+              cover_bucket: String(f?.bucket || ""),
+              cover_path: String(f?.path || ""),
+            }).catch(() => null);
+            return url || "";
+          }),
+        );
+
         setGigForm((p) => ({
           ...p,
-          images: uploadedUrls.map((url) => ({ file: null, previewUrl: url })),
+          images: previewUrls.filter(Boolean).map((url) => ({ file: null, previewUrl: url })),
         }));
       }
 
@@ -759,7 +880,9 @@ export default function FreelancerDashboard() {
           subcategory: gigForm.subcategory,
           revisions: Number(gigForm.revisions) || 0,
           tags: gigForm.tags || "",
-          cover_image_url: coverUrl,
+          cover_image_url: String(coverUpload?.publicUrl || existingGig?.cover_image_url || ""),
+          cover_bucket: coverBucket,
+          cover_path: coverPath,
           seller_id: uid,
           description_html: gigForm.descriptionHtml || "",
           services: [
@@ -785,6 +908,15 @@ export default function FreelancerDashboard() {
         };
 
         upsertStoredGig(storedGig);
+
+        // Best-effort: persist the gig to Firestore so it shows in the marketplace for everyone.
+        if (uid) {
+          try {
+            await upsertFirestoreGig(db, storedGig);
+          } catch (e) {
+            console.error("Failed to write Firestore gig", e);
+          }
+        }
 
         // Best-effort: also persist services to Firestore for the report-required Services Collection.
         if (uid) {
@@ -827,7 +959,9 @@ export default function FreelancerDashboard() {
           subcategory: gigForm.subcategory,
           revisions: Number(gigForm.revisions) || 0,
           tags: gigForm.tags || "",
-          cover_image_url: coverUrl,
+          cover_image_url: String(coverUpload?.publicUrl || ""),
+          cover_bucket: coverBucket,
+          cover_path: coverPath,
           seller_id: uid,
           description_html: gigForm.descriptionHtml || "",
           services: [
@@ -853,6 +987,15 @@ export default function FreelancerDashboard() {
         };
 
         upsertStoredGig(storedGig);
+
+        // Best-effort: persist the gig to Firestore so it shows in the marketplace for everyone.
+        if (uid) {
+          try {
+            await upsertFirestoreGig(db, storedGig);
+          } catch (e) {
+            console.error("Failed to write Firestore gig", e);
+          }
+        }
 
         // Best-effort: also persist services to Firestore for the report-required Services Collection.
         if (uid) {
@@ -960,6 +1103,35 @@ export default function FreelancerDashboard() {
       });
     }
   }
+
+  useEffect(() => {
+    async function hydrateThumbnails() {
+      const next = [];
+      for (const g of gigs) {
+        if (g?.thumbnailUrl) {
+          next.push(g);
+          continue;
+        }
+
+        const stored = getStoredGig(g?.id);
+        const signed = stored
+          ? await resolveGigCoverUrl(stored).catch(() => null)
+          : null;
+
+        next.push({
+          ...g,
+          thumbnailUrl: signed || g.thumbnailUrl || "",
+        });
+      }
+
+      setGigs(next);
+    }
+
+    // Only run when we have items (avoid clobbering initial empty state).
+    if (!Array.isArray(gigs) || !gigs.length) return;
+    hydrateThumbnails().catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gigs.length]);
 
   function promoteGig(gigId) {
     if (!gigId) return;
@@ -1734,35 +1906,56 @@ export default function FreelancerDashboard() {
                           <Table>
                             <TableHeader>
                               <TableRow>
-                                <TableHead>Client name</TableHead>
+                                <TableHead>Buyer</TableHead>
                                 <TableHead className="text-right">Order amount</TableHead>
                                 <TableHead>Deadline</TableHead>
                                 <TableHead>Status</TableHead>
+                                <TableHead className="text-right">Action</TableHead>
                               </TableRow>
                             </TableHeader>
                             <TableBody>
                               {list.length ? (
                                 list.map((o) => (
                                   <TableRow key={o.id}>
-                                    <TableCell className="font-medium">{o.clientName}</TableCell>
-                                    <TableCell className="text-right">{formatCurrency(o.amount)}</TableCell>
+                                    <TableCell className="font-medium">
+                                      {o.clientId ? `${o.clientId.slice(0, 8)}…` : "—"}
+                                    </TableCell>
+                                    <TableCell className="text-right">{formatInr(o.amountRupees)}</TableCell>
                                     <TableCell>
-                                      {new Date(o.deadlineISO).toLocaleDateString(undefined, {
-                                        year: "numeric",
-                                        month: "short",
-                                        day: "numeric",
-                                      })}
+                                      {o.deadlineISO
+                                        ? new Date(o.deadlineISO).toLocaleDateString(undefined, {
+                                            year: "numeric",
+                                            month: "short",
+                                            day: "numeric",
+                                          })
+                                        : "—"}
                                     </TableCell>
                                     <TableCell>
                                       <Badge variant={o.status === "Delivered" ? "secondary" : "default"}>
                                         {key === "late" ? "Late" : o.status}
                                       </Badge>
                                     </TableCell>
+                                    <TableCell className="text-right">
+                                      <div className="flex items-center justify-end gap-2">
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          onClick={() => navigate(`/orders/${o.id}/chat`)}
+                                        >
+                                          Open
+                                        </Button>
+                                        {(o.orderStatus === "In Progress" || o.orderStatus === "Revision") && (
+                                          <Button size="sm" onClick={() => navigate(`/orders/${o.id}/chat`)}>
+                                            Deliver
+                                          </Button>
+                                        )}
+                                      </div>
+                                    </TableCell>
                                   </TableRow>
                                 ))
                               ) : (
                                 <TableRow>
-                                  <TableCell colSpan={4} className="text-muted-foreground">
+                                  <TableCell colSpan={5} className="text-muted-foreground">
                                     No orders
                                   </TableCell>
                                 </TableRow>

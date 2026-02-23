@@ -7,6 +7,13 @@ type SignedUploadResponse = {
   signedUrl: string | null;
 };
 
+type SignedDownloadResponse = {
+  bucket: string;
+  path: string;
+  signedUrl: string | null;
+  expiresInSeconds: number;
+};
+
 async function ensureFunctionExists(functionName: string): Promise<void> {
   // Important: use a simple cross-origin request (no custom headers) so we can
   // detect "function not found" without triggering a CORS preflight.
@@ -121,5 +128,34 @@ export async function supabaseUploadViaFunction(args: {
     bucket: String(data?.bucket || args.bucket),
     path: String(data?.path || args.path),
     publicUrl: data?.publicUrl ? String(data.publicUrl) : null,
+  };
+}
+
+export async function supabaseSignedDownloadUrl(args: {
+  bucket: string;
+  path: string;
+  expiresInSeconds?: number;
+}): Promise<SignedDownloadResponse> {
+  await ensureFunctionExists("storage-signed-download");
+  const token = await getFirebaseIdToken();
+
+  const data = await fetchJson(`${getFunctionsBaseUrl()}/storage-signed-download`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-firebase-token": token,
+    },
+    body: JSON.stringify({
+      bucket: args.bucket,
+      path: args.path,
+      expiresInSeconds: Number(args.expiresInSeconds || 0) || undefined,
+    }),
+  });
+
+  return {
+    bucket: String(data?.bucket || args.bucket),
+    path: String(data?.path || args.path),
+    signedUrl: data?.signedUrl ? String(data.signedUrl) : null,
+    expiresInSeconds: Number(data?.expiresInSeconds || 0) || (Number(args.expiresInSeconds || 0) || 0),
   };
 }

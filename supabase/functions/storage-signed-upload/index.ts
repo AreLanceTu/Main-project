@@ -34,6 +34,22 @@ function isSafePath(path: string): boolean {
   return true;
 }
 
+async function ensureBucketExists(supabase: any, bucket: string) {
+  const name = normalize(bucket);
+  if (!name) throw new Error("Missing bucket");
+
+  const { data: buckets, error: listError } = await supabase.storage.listBuckets();
+  if (!listError && Array.isArray(buckets) && buckets.some((b: any) => b?.name === name)) {
+    return;
+  }
+
+  const { error: createError } = await supabase.storage.createBucket(name, { public: false });
+  if (createError) {
+    const msg = String((createError as any)?.message || "");
+    if (!msg.toLowerCase().includes("already")) throw createError;
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: withCors() });
@@ -73,6 +89,9 @@ Deno.serve(async (req: Request) => {
 
     const supabase = createClient(supabaseUrl, serviceRoleKey);
 
+    // Auto-create bucket for first-time setup.
+    await ensureBucketExists(supabase, bucket);
+
     const { data, error } = await supabase.storage.from(bucket).createSignedUploadUrl(path, {
       contentType,
       upsert: true,
@@ -90,9 +109,26 @@ Deno.serve(async (req: Request) => {
       { headers: withCors({ "Content-Type": "application/json" }) },
     );
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    return new Response(JSON.stringify({ error: message || "Unknown error" }), {
-      status: 400,
+    const message =
+      typeof (e as any)?.message === "string"
+        ? String((e as any).message)
+        : e instanceof Error
+          ? e.message
+          : (() => {
+              try {
+                return JSON.stringify(e);
+              } catch {
+                return String(e);
+              }
+            })();
+
+    const statusCode = Number((e as any)?.statusCode || (e as any)?.status) || 400;
+    const extraHint = String(message || "").toLowerCase().includes("bucket")
+      ? " Bucket not found: create it in Supabase Storage for the SAME project configured in this Edge Function (check SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)."
+      : "";
+
+    return new Response(JSON.stringify({ error: `${message || "Unknown error"}${extraHint}`.trim() }), {
+      status: statusCode,
       headers: withCors({ "Content-Type": "application/json" }),
     });
   }
