@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Helmet } from "react-helmet-async";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import { onAuthStateChanged, type User } from "firebase/auth";
+import { collection, doc, serverTimestamp, setDoc } from "firebase/firestore";
 
 import Navbar from "@/components/layout/Navbar";
 import Footer from "@/components/layout/Footer";
@@ -9,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
-import { auth } from "@/firebase";
+import { auth, db } from "@/firebase";
 import { getStoredGig } from "@/lib/gigStore";
 import { openRazorpayCheckout, verifyRazorpayPayment } from "@/lib/payments";
 import { useToast } from "@/hooks/use-toast";
@@ -116,6 +117,30 @@ export default function Checkout() {
 
       if (!verify?.ok) {
         throw new Error(verify?.error || "Payment verification failed");
+      }
+
+      // Create an order record in Firestore (Orders Collection) for the report-required schema.
+      // This is best-effort and should not block a successful payment flow.
+      try {
+        const orderRef = doc(collection(db, "orders"));
+        await setDoc(orderRef, {
+          orderId: orderRef.id,
+          clientId: user.uid,
+          serviceId: service.service_id,
+          paymentStatus: "Paid",
+          orderStatus: "Pending",
+          createdAt: serverTimestamp(),
+
+          // Optional metadata (helps debugging / traceability).
+          razorpayOrderId: orderId,
+          razorpayPaymentId: paymentId,
+          gigId: gig.gig_id,
+          sellerId: gig.seller_id,
+          amountRupees,
+        });
+      } catch (writeErr) {
+        // eslint-disable-next-line no-console
+        console.error("Failed to write Firestore order", writeErr);
       }
 
       navigate(

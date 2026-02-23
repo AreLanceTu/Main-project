@@ -1,4 +1,5 @@
 import { getFunctionsBaseUrl } from "@/lib/functionsClient";
+import { getFirebaseIdToken } from "@/lib/functionsClient";
 
 type CreateOrderResponse = {
   orderId: string;
@@ -15,10 +16,18 @@ export async function createRazorpayOrder(params: {
   purpose?: string;
   notes?: Record<string, unknown>;
 }): Promise<CreateOrderResponse> {
+  let token: string | null = null;
+  try {
+    token = await getFirebaseIdToken();
+  } catch {
+    token = null;
+  }
+
   const res = await fetch(`${getFunctionsBaseUrl()}/payments-create-order`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { "x-firebase-token": token } : {}),
     },
     body: JSON.stringify({
       amount: params.amountRupees,
@@ -43,10 +52,18 @@ export async function verifyRazorpayPayment(params: {
   paymentId: string;
   signature: string;
 }): Promise<VerifyResponse> {
+  let token: string | null = null;
+  try {
+    token = await getFirebaseIdToken();
+  } catch {
+    token = null;
+  }
+
   const res = await fetch(`${getFunctionsBaseUrl()}/payments-verify`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { "x-firebase-token": token } : {}),
     },
     body: JSON.stringify({
       razorpay_order_id: params.orderId,

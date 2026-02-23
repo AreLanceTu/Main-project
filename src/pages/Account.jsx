@@ -20,6 +20,9 @@ import { auth, db } from "@/firebase";
 import { getUserRole } from "@/auth/role";
 import { supabase } from "@/supabase";
 import { isValidUsername, normalizeUsername } from "@/lib/userProfile";
+import { openRazorpayCheckout, verifyRazorpayPayment } from "@/lib/payments";
+import { getMySubscriptionStatus } from "@/lib/subscriptions";
+import { getMyPaymentOrders } from "@/lib/paymentOrders";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -56,6 +59,15 @@ export default function Account() {
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [usernameError, setUsernameError] = useState(null);
   const [usernameSuccess, setUsernameSuccess] = useState(null);
+
+  const [proActive, setProActive] = useState(false);
+  const [verifiedBadge, setVerifiedBadge] = useState(false);
+  const [proEndsAt, setProEndsAt] = useState(null);
+  const [upgradingPro, setUpgradingPro] = useState(false);
+
+  const [paymentOrders, setPaymentOrders] = useState([]);
+  const [paymentOrdersLoading, setPaymentOrdersLoading] = useState(false);
+  const [paymentOrdersError, setPaymentOrdersError] = useState(null);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -108,16 +120,107 @@ export default function Account() {
         const nextUsername = data.username || data.usernameLower || null;
         setUsername(nextUsername);
         setUsernameDraft((prev) => (prev ? prev : nextUsername || ""));
+
+        setProActive(Boolean(data.proActive || data.isPro || data.subscriptionActive));
+        setVerifiedBadge(Boolean(data.verifiedBadge || data.isVerified));
+        setProEndsAt(data.proEndsAt || null);
       },
       (err) => {
         console.error("Failed to load username", err);
         setUsername(null);
         setUsernameDraft("");
+        setProActive(false);
+        setVerifiedBadge(false);
+        setProEndsAt(null);
       },
     );
 
     return unsub;
   }, [user?.uid]);
+
+  useEffect(() => {
+    if (!user?.uid) {
+      setPaymentOrders([]);
+      setPaymentOrdersError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setPaymentOrdersLoading(true);
+    setPaymentOrdersError(null);
+
+    getMyPaymentOrders(10)
+      .then((items) => {
+        if (cancelled) return;
+        setPaymentOrders(Array.isArray(items) ? items : []);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setPaymentOrders([]);
+        setPaymentOrdersError(e);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setPaymentOrdersLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid]);
+
+  async function upgradeToPro() {
+    if (!user?.uid || upgradingPro) return;
+
+    try {
+      setUpgradingPro(true);
+      const { orderId, paymentId, signature } = await openRazorpayCheckout({
+        amountRupees: 800,
+        purpose: "Pro subscription (₹800)",
+        prefill: { email: user?.email || undefined },
+        notes: {
+          purchase_type: "subscription",
+          plan: "pro",
+          duration_days: 30,
+        },
+      });
+
+      const verify = await verifyRazorpayPayment({ orderId, paymentId, signature });
+      if (!verify?.ok) throw new Error(verify?.error || "Payment verification failed");
+
+      const end = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      await setDoc(
+        doc(db, "users", user.uid),
+        {
+          proActive: true,
+          verifiedBadge: true,
+          proPlan: "pro",
+          proEndsAt: end,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+
+      try {
+        const status = await getMySubscriptionStatus();
+        setProActive(Boolean(status?.active));
+        setProEndsAt(status?.currentPeriodEnd || end);
+      } catch {
+        setProActive(true);
+        setProEndsAt(end);
+      }
+
+      toast({ title: "Subscription active", description: "Pro is enabled on your profile." });
+    } catch (e) {
+      toast({
+        title: "Upgrade failed",
+        description: e?.message ?? "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setUpgradingPro(false);
+    }
+  }
 
   async function saveUsername() {
     if (!user?.uid) return;
@@ -316,6 +419,8 @@ export default function Account() {
                   <span className="font-medium text-foreground">
                     {username ? `@${username}` : "(username not set)"}
                   </span>
+                  {verifiedBadge ? <Badge className="ml-2" variant="secondary">Verified</Badge> : null}
+                  {proActive ? <Badge className="ml-2" variant="outline">Pro</Badge> : null}
                   <span className="text-muted-foreground"> · </span>
                   <span className="text-foreground">{effectiveRole}</span>
                 </>
@@ -345,6 +450,19 @@ export default function Account() {
                     </div>
                     <div className="text-sm text-muted-foreground truncate">
                       {username ? `@${username}` : "Username not set"}
+                    </div>
+                    <div className="mt-2 flex items-center gap-2 flex-wrap">
+                      {verifiedBadge ? <Badge variant="secondary">Verified</Badge> : <Badge variant="outline">Unverified</Badge>}
+                      {proActive ? (
+                        <Badge variant="outline">Pro</Badge>
+                      ) : (
+                        <Button size="sm" onClick={upgradeToPro} disabled={upgradingPro}>
+                          {upgradingPro ? "Processing…" : "Upgrade ₹800"}
+                        </Button>
+                      )}
+                      {proEndsAt ? (
+                        <span className="text-xs text-muted-foreground">Until {new Date(proEndsAt).toLocaleDateString()}</span>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -527,6 +645,58 @@ export default function Account() {
               </CardContent>
             </Card>
           </section>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Purchase history</CardTitle>
+              <CardDescription>Your recent payments (stored in Supabase)</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {paymentOrdersError ? (
+                <div className="text-sm text-destructive">
+                  {String(paymentOrdersError?.message || paymentOrdersError)}
+                </div>
+              ) : null}
+
+              {paymentOrdersLoading ? (
+                <div className="text-sm text-muted-foreground">Loading…</div>
+              ) : paymentOrders.length ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Purpose</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="text-right">Amount</TableHead>
+                      <TableHead className="text-right">Date</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {paymentOrders.map((o) => {
+                      const notes = o?.notes || {};
+                      const purpose = String(notes?.purpose || notes?.invoice_type || notes?.purchase_type || "Payment");
+                      const amount = Number(o?.amount || 0) / 100;
+                      const dateIso = o?.paid_at || o?.created_at;
+                      const dateLabel = dateIso ? new Date(dateIso).toLocaleString() : "";
+                      return (
+                        <TableRow key={o.id}>
+                          <TableCell className="max-w-[520px] truncate">{purpose}</TableCell>
+                          <TableCell>
+                            <Badge variant={o.status === "paid" ? "secondary" : "outline"}>
+                              {String(o.status || "")}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-right">₹{amount.toLocaleString()}</TableCell>
+                          <TableCell className="text-right text-muted-foreground">{dateLabel}</TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              ) : (
+                <div className="text-sm text-muted-foreground">No payments yet.</div>
+              )}
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>

@@ -26,6 +26,7 @@ interface Gig {
   price: number;
   deliveryTime: string;
   category: string;
+  promoted?: boolean;
 }
 
 type GigItem = Gig & {
@@ -45,6 +46,8 @@ type StoredGig = {
   cover_image_url: string;
   seller_id: string;
   services?: StoredService[];
+  promoted?: boolean;
+  promoted_at?: string;
 };
 
 function buildDemoGigDescriptionHtml(params: { title: string; category: string }) {
@@ -266,6 +269,8 @@ const Gigs = () => {
 
       const sellerShort = g.seller_id ? String(g.seller_id).slice(0, 8) : "Seller";
 
+      const promoted = Boolean((g as any)?.promoted);
+
       return {
         source: "stored",
         id: String(g.gig_id),
@@ -277,6 +282,7 @@ const Gigs = () => {
         price: startingAt,
         deliveryTime: minDays ? `${minDays} day${minDays === 1 ? "" : "s"}` : "",
         category: "New",
+        promoted,
       } satisfies GigItem;
     });
   }, []);
@@ -336,8 +342,30 @@ const Gigs = () => {
       list = list.filter((g) => g.category === category);
     }
 
-    return list;
-  }, [baseGigs, storedGigs, searchQuery, category]);
+    const promotedRank = (g: GigItem) => (g.promoted ? 1 : 0);
+
+    const sorted = [...list].sort((a, b) => {
+      const promo = promotedRank(b) - promotedRank(a);
+      if (promo !== 0) return promo;
+
+      if (sortBy === "price-low") return a.price - b.price;
+      if (sortBy === "price-high") return b.price - a.price;
+      if (sortBy === "newest") {
+        // Stored gigs are effectively "newer" than base demo items.
+        if (a.source !== b.source) return a.source === "stored" ? -1 : 1;
+        return 0;
+      }
+      if (sortBy === "best-selling") {
+        // Demo heuristic: use reviews as a proxy.
+        return (b.reviews || 0) - (a.reviews || 0);
+      }
+
+      // recommended
+      return (b.rating || 0) - (a.rating || 0);
+    });
+
+    return sorted;
+  }, [baseGigs, storedGigs, searchQuery, category, sortBy]);
 
   const categories = [
     "All Categories",
@@ -564,6 +592,11 @@ const Gigs = () => {
                             <span className="text-xs font-medium text-primary bg-secondary px-2 py-0.5 rounded-full">
                               {gig.seller.level}
                             </span>
+                            {gig.promoted ? (
+                              <span className="text-xs font-medium text-foreground bg-muted px-2 py-0.5 rounded-full">
+                                Promoted
+                              </span>
+                            ) : null}
                           </div>
 
                           {/* Title */}

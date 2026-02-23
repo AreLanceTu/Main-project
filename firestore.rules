@@ -24,6 +24,70 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/job_posts/$(jobId));
     }
 
+    function isValidOrderCreate(orderId) {
+      return isSignedIn()
+        && request.resource.data.orderId == orderId
+        && request.resource.data.clientId == request.auth.uid
+        && request.resource.data.serviceId is string
+        && request.resource.data.serviceId.size() > 0
+        && request.resource.data.paymentStatus in ['Paid', 'Failed']
+        && request.resource.data.orderStatus in ['Pending', 'Completed']
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.keys().hasAll([
+          'orderId',
+          'clientId',
+          'serviceId',
+          'paymentStatus',
+          'orderStatus',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'orderId',
+          'clientId',
+          'serviceId',
+          'paymentStatus',
+          'orderStatus',
+          'createdAt',
+          // Optional metadata fields (non-sensitive, for traceability)
+          'razorpayOrderId',
+          'razorpayPaymentId',
+          'gigId',
+          'sellerId',
+          'amountRupees'
+        ]);
+    }
+
+    function isValidServiceWrite(serviceId) {
+      return isSignedIn()
+        && request.resource.data.serviceId == serviceId
+        && request.resource.data.freelancerId == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.description is string
+        && request.resource.data.category is string
+        && request.resource.data.price is number
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.keys().hasAll([
+          'serviceId',
+          'freelancerId',
+          'title',
+          'description',
+          'category',
+          'price',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'serviceId',
+          'freelancerId',
+          'title',
+          'description',
+          'category',
+          'price',
+          'createdAt',
+          'updatedAt'
+        ]);
+    }
+
     // User profiles
     // - Readable by any authenticated user (so you can show name/photo in chat list)
     // - Writable only by the owner
@@ -136,6 +200,30 @@ service cloud.firestore {
         jobDoc(resource.data.jobId).data.createdBy == request.auth.uid
       );
 
+      allow delete: if false;
+    }
+
+    // Orders
+    // - Created by the authenticated client after successful payment verification
+    // - Readable only by the owner (client)
+    match /orders/{orderId} {
+      allow read: if isSignedIn() && resource.data.clientId == request.auth.uid;
+      allow create: if isValidOrderCreate(orderId);
+      allow update, delete: if false;
+    }
+
+    // Services
+    // - Each service document is owned by a freelancer
+    // - Readable by any authenticated user (to show listings)
+    match /services/{serviceId} {
+      allow read: if isSignedIn();
+      allow create: if isValidServiceWrite(serviceId);
+      allow update: if isSignedIn()
+        && resource.data.freelancerId == request.auth.uid
+        && request.resource.data.freelancerId == resource.data.freelancerId
+        && request.resource.data.serviceId == resource.data.serviceId
+        && request.resource.data.createdAt == resource.data.createdAt
+        && isValidServiceWrite(serviceId);
       allow delete: if false;
     }
 

@@ -1,12 +1,13 @@
 import { Helmet } from "react-helmet-async";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
+import { doc, serverTimestamp, setDoc } from "firebase/firestore";
 import * as RechartsPrimitive from "recharts";
 import { useNavigate } from "react-router-dom";
 
 import Navbar from "@/components/layout/Navbar";
 import Footer from "@/components/layout/Footer";
-import { auth } from "@/firebase";
+import { auth, db } from "@/firebase";
 import { supabase } from "@/supabase";
 import { setUserRole } from "@/auth/role";
 import {
@@ -52,6 +53,10 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 import { useToast } from "@/hooks/use-toast";
 import { getStoredGig, listStoredGigs, removeStoredGig, upsertStoredGig } from "@/lib/gigStore";
 import { getFirebaseIdToken, getFunctionsBaseUrl } from "@/lib/functionsClient";
+import { openRazorpayCheckout, verifyRazorpayPayment } from "@/lib/payments";
+import { getMySubscriptionStatus } from "@/lib/subscriptions";
+import { upsertFirestoreServices } from "@/lib/services";
+import { supabaseUploadViaFunction } from "@/lib/supabaseStorage";
 
 function formatCurrency(amount) {
   const value = typeof amount === "number" && Number.isFinite(amount) ? amount : 0;
@@ -158,6 +163,11 @@ export default function FreelancerDashboard() {
   const [userUid, setUserUid] = useState(null);
   const [profileCompletion, setProfileCompletion] = useState(0);
   const [openSection, setOpenSection] = useState(null);
+
+  const [proLoading, setProLoading] = useState(false);
+  const [proActive, setProActive] = useState(false);
+  const [proEndsAt, setProEndsAt] = useState(null);
+  const [upgradingPro, setUpgradingPro] = useState(false);
 
   const [gigs, setGigs] = useState(() => {
     const stored = listStoredGigs();
@@ -355,6 +365,97 @@ export default function FreelancerDashboard() {
   }, []);
 
   useEffect(() => {
+    if (!userUid) {
+      setProActive(false);
+      setProEndsAt(null);
+      return;
+    }
+
+    let cancelled = false;
+    setProLoading(true);
+
+    getMySubscriptionStatus()
+      .then((s) => {
+        if (cancelled) return;
+        setProActive(Boolean(s?.active));
+        setProEndsAt(s?.currentPeriodEnd || null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setProActive(false);
+        setProEndsAt(null);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setProLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userUid]);
+
+  async function upgradeToPro() {
+    if (!userUid || upgradingPro) return;
+
+    try {
+      setUpgradingPro(true);
+
+      const { orderId, paymentId, signature } = await openRazorpayCheckout({
+        amountRupees: 800,
+        purpose: "Pro subscription (₹800)",
+        prefill: { email: userEmail || undefined },
+        notes: {
+          purchase_type: "subscription",
+          plan: "pro",
+          duration_days: 30,
+        },
+      });
+
+      const verify = await verifyRazorpayPayment({ orderId, paymentId, signature });
+      if (!verify?.ok) {
+        throw new Error(verify?.error || "Payment verification failed");
+      }
+
+      // This app surfaces badges from Firebase user profile docs.
+      const end = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      await setDoc(
+        doc(db, "users", userUid),
+        {
+          proActive: true,
+          verifiedBadge: true,
+          proPlan: "pro",
+          proEndsAt: end,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+
+      try {
+        const status = await getMySubscriptionStatus();
+        setProActive(Boolean(status?.active));
+        setProEndsAt(status?.currentPeriodEnd || end);
+      } catch {
+        setProActive(true);
+        setProEndsAt(end);
+      }
+
+      toast({
+        title: "Subscription active",
+        description: "Pro is enabled on your profile.",
+      });
+    } catch (e) {
+      toast({
+        title: "Upgrade failed",
+        description: e?.message || "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setUpgradingPro(false);
+    }
+  }
+
+  useEffect(() => {
     if (!userUid) return;
 
     let cancelled = false;
@@ -548,6 +649,15 @@ export default function FreelancerDashboard() {
     if (!userUid) throw new Error("Not signed in");
     if (!Array.isArray(files) || files.length === 0) return [];
 
+    function isBucketMissing(err) {
+      const message = String(err?.message || err?.error_description || err?.error || "").toLowerCase();
+      const status = Number(err?.statusCode || err?.status || 0);
+      return status === 404 || message.includes("bucket") && message.includes("not") && message.includes("found");
+    }
+
+    const preferredBucket = String(import.meta.env.VITE_SUPABASE_GIG_IMAGES_BUCKET || "gig-images").trim() || "gig-images";
+    const fallbackBucket = "uploads";
+
     const uploadedUrls = [];
 
     for (const file of files) {
@@ -562,18 +672,39 @@ export default function FreelancerDashboard() {
       const safeName = String(file.name || "image").replace(/[^a-zA-Z0-9._-]/g, "_");
       const path = `gigs/${userUid}/${safeGigId}/${Date.now()}-${safeName}`;
 
-      const { error: uploadError } = await supabase.storage.from("gig-images").upload(path, file, {
-        contentType: file.type,
-        upsert: true,
-        cacheControl: "3600",
-      });
+      // Prefer uploading via Edge Function so Storage RLS doesn't block inserts.
+      // Try preferred bucket first, then fallback bucket.
+      try {
+        const res = await supabaseUploadViaFunction({
+          bucket: preferredBucket,
+          path,
+          file,
+        });
+        if (!res?.publicUrl) throw new Error("Could not get public URL for uploaded image");
+        uploadedUrls.push(res.publicUrl);
+        continue;
+      } catch (e) {
+        // If the preferred bucket doesn't exist, try a common fallback.
+        if (!isBucketMissing(e)) throw e;
+      }
 
-      if (uploadError) throw uploadError;
-
-      const { data: publicData } = supabase.storage.from("gig-images").getPublicUrl(path);
-      const url = publicData?.publicUrl;
-      if (!url) throw new Error("Could not get public URL for uploaded image");
-      uploadedUrls.push(url);
+      try {
+        const res = await supabaseUploadViaFunction({
+          bucket: fallbackBucket,
+          path,
+          file,
+        });
+        if (!res?.publicUrl) throw new Error("Could not get public URL for uploaded image");
+        uploadedUrls.push(res.publicUrl);
+      } catch (e) {
+        if (isBucketMissing(e)) {
+          throw new Error(
+            `Supabase Storage bucket not found. Create a bucket named '${preferredBucket}' (recommended) ` +
+              `or '${fallbackBucket}' in Supabase Dashboard → Storage, then try again.`,
+          );
+        }
+        throw e;
+      }
     }
 
     return uploadedUrls;
@@ -584,6 +715,7 @@ export default function FreelancerDashboard() {
     if (!title) return;
 
     try {
+      const uid = userUid || auth.currentUser?.uid || "";
       const gigId = gigForm.editingGigId || `gig-${Date.now()}`;
 
       const selectedFiles = (gigForm.images || [])
@@ -620,7 +752,7 @@ export default function FreelancerDashboard() {
           ),
         );
 
-        upsertStoredGig({
+        const storedGig = {
           gig_id: gigId,
           title,
           category: gigForm.category,
@@ -628,7 +760,7 @@ export default function FreelancerDashboard() {
           revisions: Number(gigForm.revisions) || 0,
           tags: gigForm.tags || "",
           cover_image_url: coverUrl,
-          seller_id: userUid || "",
+          seller_id: uid,
           description_html: gigForm.descriptionHtml || "",
           services: [
             {
@@ -650,7 +782,30 @@ export default function FreelancerDashboard() {
               delivery_time_days: Number(gigForm.deliveryTimeDays) || 1,
             },
           ],
-        });
+        };
+
+        upsertStoredGig(storedGig);
+
+        // Best-effort: also persist services to Firestore for the report-required Services Collection.
+        if (uid) {
+          try {
+            await upsertFirestoreServices({
+              db,
+              freelancerId: uid,
+              gigTitle: storedGig.title,
+              gigDescription: storedGig.description_html,
+              category: storedGig.category,
+              services: storedGig.services,
+            });
+          } catch (e) {
+            console.error("Failed to write Firestore services", e);
+            toast({
+              title: "Firestore sync failed",
+              description: e?.message || "Could not write services to Firestore. Check rules/auth and try again.",
+              variant: "destructive",
+            });
+          }
+        }
       } else {
         const newGig = {
           id: gigId,
@@ -660,12 +815,12 @@ export default function FreelancerDashboard() {
           impressions: 0,
           clicks: 0,
           orders: 0,
-          sellerId: userUid || "",
+          sellerId: uid,
         };
         setGigs((prev) => [newGig, ...prev]);
         setSelectedGigId(newGig.id);
 
-        upsertStoredGig({
+        const storedGig = {
           gig_id: gigId,
           title,
           category: gigForm.category,
@@ -673,7 +828,7 @@ export default function FreelancerDashboard() {
           revisions: Number(gigForm.revisions) || 0,
           tags: gigForm.tags || "",
           cover_image_url: coverUrl,
-          seller_id: userUid || "",
+          seller_id: uid,
           description_html: gigForm.descriptionHtml || "",
           services: [
             {
@@ -695,7 +850,30 @@ export default function FreelancerDashboard() {
               delivery_time_days: Number(gigForm.deliveryTimeDays) || 1,
             },
           ],
-        });
+        };
+
+        upsertStoredGig(storedGig);
+
+        // Best-effort: also persist services to Firestore for the report-required Services Collection.
+        if (uid) {
+          try {
+            await upsertFirestoreServices({
+              db,
+              freelancerId: uid,
+              gigTitle: storedGig.title,
+              gigDescription: storedGig.description_html,
+              category: storedGig.category,
+              services: storedGig.services,
+            });
+          } catch (e) {
+            console.error("Failed to write Firestore services", e);
+            toast({
+              title: "Firestore sync failed",
+              description: e?.message || "Could not write services to Firestore. Check rules/auth and try again.",
+              variant: "destructive",
+            });
+          }
+        }
 
         setGigForm((p) => ({ ...p, editingGigId: gigId }));
       }
@@ -781,6 +959,30 @@ export default function FreelancerDashboard() {
         return remaining[0]?.id ?? prev;
       });
     }
+  }
+
+  function promoteGig(gigId) {
+    if (!gigId) return;
+    if (!proActive) {
+      toast({
+        title: "Pro required",
+        description: "Upgrade to Pro to promote your gig and boost ranking.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const stored = getStoredGig(gigId);
+    if (!stored) return;
+
+    upsertStoredGig({
+      ...stored,
+      promoted: true,
+      promoted_at: new Date().toISOString(),
+    });
+
+    setGigs((prev) => prev.map((g) => (g.id === gigId ? { ...g, promoted: true } : g)));
+    toast({ title: "Gig promoted", description: "Your gig will rank higher in listings." });
   }
 
   function openGig(gigId) {
@@ -896,6 +1098,24 @@ export default function FreelancerDashboard() {
                 </CardContent>
               </Card>
             </div>
+
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription>Pro Subscription</CardDescription>
+                <CardTitle className="text-2xl">
+                  {proLoading ? "Checking…" : proActive ? "Active" : "Inactive"}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-sm text-muted-foreground">
+                  Pay ₹800 to get a Pro badge + Verified badge, higher ranking, and the Promote option.
+                  {proEndsAt ? ` Active until ${new Date(proEndsAt).toLocaleDateString()}.` : ""}
+                </div>
+                <Button onClick={upgradeToPro} disabled={upgradingPro || proActive}>
+                  {proActive ? "Pro Enabled" : upgradingPro ? "Processing…" : "Upgrade ₹800"}
+                </Button>
+              </CardContent>
+            </Card>
           </section>
 
           <Separator />
@@ -985,6 +1205,17 @@ export default function FreelancerDashboard() {
                                 <TableCell className="text-right">{conv.toFixed(1)}%</TableCell>
                                 <TableCell className="text-right">
                                   <div className="flex items-center justify-end gap-2 flex-wrap">
+                                    <Button
+                                      variant="secondary"
+                                      size="sm"
+                                      disabled={!proActive}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        promoteGig(gig.id);
+                                      }}
+                                    >
+                                      Promote
+                                    </Button>
                                     <Button
                                       variant="outline"
                                       size="sm"
@@ -1248,12 +1479,20 @@ export default function FreelancerDashboard() {
                               multiple
                               accept="image/*"
                               onChange={(e) => {
-                                const files = Array.from(e.target.files ?? []);
-                                const withPreview = files.map((f) => ({
-                                  file: f,
-                                  previewUrl: URL.createObjectURL(f),
-                                }));
+                                const input = e.currentTarget;
+                                const files = Array.from(input.files ?? []);
+                                const withPreview = files
+                                  .filter(Boolean)
+                                  .map((f) => ({
+                                    file: f,
+                                    previewUrl: URL.createObjectURL(f),
+                                    name: f.name,
+                                  }));
+
                                 setGigForm((p) => ({ ...p, images: withPreview }));
+
+                                // Allow selecting the same file(s) again to re-trigger onChange.
+                                input.value = "";
                               }}
                             />
                             {gigForm.images?.length ? (
@@ -1268,15 +1507,32 @@ export default function FreelancerDashboard() {
                                 ))}
                               </div>
                             ) : null}
+                            {gigForm.images?.length ? (
+                              <div className="text-xs text-muted-foreground">
+                                Selected {gigForm.images.length} file(s)
+                                {gigForm.images?.[0]?.name ? `: ${gigForm.images.slice(0, 3).map((i) => i.name).join(", ")}${gigForm.images.length > 3 ? "…" : ""}` : ""}
+                              </div>
+                            ) : null}
                           </div>
                         </div>
                       </div>
 
                       <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-end pt-2">
-                        <Button variant="outline" onClick={() => void upsertGig({ status: "Draft" })}>
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            upsertGig({ status: "Draft" }).catch((e) => console.error("Save draft failed", e));
+                          }}
+                        >
                           Save as Draft
                         </Button>
-                        <Button onClick={() => void upsertGig({ status: "Active" })}>Publish</Button>
+                        <Button
+                          onClick={() => {
+                            upsertGig({ status: "Active" }).catch((e) => console.error("Publish failed", e));
+                          }}
+                        >
+                          Publish
+                        </Button>
                       </div>
                     </CardContent>
                   </Card>

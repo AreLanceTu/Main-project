@@ -16,6 +16,9 @@ type VerifyBody = {
   signature?: string;
 };
 
+const SUBSCRIPTION_AMOUNT_PAISE = 800 * 100;
+const DEFAULT_SUBSCRIPTION_DAYS = 30;
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: withCors() });
@@ -74,7 +77,7 @@ Deno.serve(async (req) => {
     // If uid is set, ensure the order belongs to this Firebase user.
     const { data: order, error: loadErr } = await supabase
       .from("payment_orders")
-      .select("id, firebase_uid, status")
+      .select("id, firebase_uid, status, amount, notes")
       .eq("razorpay_order_id", orderId)
       .maybeSingle();
 
@@ -113,6 +116,45 @@ Deno.serve(async (req) => {
       .eq("id", order.id);
 
     if (updErr) throw updErr;
+
+    // Subscription activation (₹800 Pro).
+    try {
+      const notes = (order as any)?.notes || {};
+      const purchaseType = String(notes.purchase_type || notes.type || "").toLowerCase();
+      const plan = String(notes.plan || "").toLowerCase();
+      if (purchaseType === "subscription") {
+        if (Number(order.amount) !== SUBSCRIPTION_AMOUNT_PAISE) {
+          throw new Error("Subscription amount mismatch");
+        }
+
+        const days = Number(notes.duration_days);
+        const durationDays = Number.isFinite(days) && days > 0 ? Math.floor(days) : DEFAULT_SUBSCRIPTION_DAYS;
+        const now = new Date();
+        const end = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000);
+
+        const subPlan = plan || "pro";
+
+        const { error: subErr } = await supabase
+          .from("user_subscriptions")
+          .upsert(
+            {
+              firebase_uid: order.firebase_uid,
+              plan: subPlan,
+              status: "active",
+              current_period_start: now.toISOString(),
+              current_period_end: end.toISOString(),
+              last_payment_order_id: orderId,
+              last_payment_id: paymentId,
+            },
+            { onConflict: "firebase_uid" },
+          );
+
+        if (subErr) throw subErr;
+      }
+    } catch (subE) {
+      // Do not fail the payment verification response; payment is valid.
+      console.error("Subscription activation failed", subE);
+    }
 
     return new Response(JSON.stringify({ ok: true, status: "paid" }), {
       headers: withCors({ "Content-Type": "application/json" }),

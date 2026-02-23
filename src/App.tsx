@@ -20,6 +20,7 @@ import Gigs from "./pages/Gigs";
 import Gig from "./pages/Gig";
 import Checkout from "./pages/Checkout";
 import OrderConfirmation from "./pages/OrderConfirmation";
+import MyOrders from "./pages/MyOrders";
 import JobPosts from "./pages/JobPosts";
 import JobPostDetails from "./pages/JobPostDetails";
 import NotFound from "./pages/NotFound";
@@ -115,6 +116,15 @@ const App = () => (
               element={
                 <AuthGuard>
                   <OrderConfirmation />
+                </AuthGuard>
+              }
+            />
+
+            <Route
+              path="/my-orders"
+              element={
+                <AuthGuard>
+                  <MyOrders />
                 </AuthGuard>
               }
             />

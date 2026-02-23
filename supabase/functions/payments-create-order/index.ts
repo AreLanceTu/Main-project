@@ -113,7 +113,10 @@ Deno.serve(async (req) => {
       status: "created",
       razorpay_order_id: razorpayOrderId,
       receipt,
-      notes: body.notes || {},
+      notes: {
+        purpose: body.purpose || "",
+        ...(body.notes || {}),
+      },
     });
 
     if (error) {

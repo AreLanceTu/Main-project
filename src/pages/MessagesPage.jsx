@@ -40,6 +40,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import {
   Sheet,
   SheetContent,
@@ -48,6 +49,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Search, UserRoundSearch } from "lucide-react";
+import { BadgeCheck } from "lucide-react";
 
 function initials(name) {
   const s = String(name || "").trim();
@@ -271,6 +273,8 @@ export default function MessagesPage({ currentUid }) {
               username: data.username || data.usernameLower || "",
               role: data.role || "",
               photoURL: data.photoURL || "",
+              proActive: Boolean(data.proActive || data.isPro || data.subscriptionActive),
+              verifiedBadge: Boolean(data.verifiedBadge || data.isVerified),
               isMe: d.id === currentUid,
             });
           }
@@ -879,7 +883,16 @@ export default function MessagesPage({ currentUid }) {
                     </Avatar>
                     <div className="min-w-0">
                       <div className="text-sm font-medium truncate text-slate-900 dark:text-slate-100">
-                        {u.username ? `@${u.username}` : u.name}
+                        <span className="inline-flex items-center gap-2">
+                          <span className="truncate">{u.username ? `@${u.username}` : u.name}</span>
+                          {u.verifiedBadge ? (
+                            <Badge variant="secondary" className="gap-1">
+                              <BadgeCheck className="h-3.5 w-3.5" />
+                              Verified
+                            </Badge>
+                          ) : null}
+                          {u.proActive ? <Badge variant="outline">Pro</Badge> : null}
+                        </span>
                       </div>
                       <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
                         {u.username ? u.name : u.uid}

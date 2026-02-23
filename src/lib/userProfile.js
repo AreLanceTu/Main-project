@@ -127,6 +127,8 @@ export async function ensureUserProfile(db, user, { role, fullName, username } =
   }
 
   const payload = {
+    uid: user.uid,
+    email: user.email || "",
     name,
     nameLower: normalizeNameLower(name),
     photoURL,
