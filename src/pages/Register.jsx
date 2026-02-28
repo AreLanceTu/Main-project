@@ -33,6 +33,7 @@ import {
   setUserRole,
 } from "@/auth/role";
 import { ensureUserProfile, isValidUsername, normalizeUsername } from "@/lib/userProfile";
+import { resolveCountryCode } from "@/lib/geo";
 
 export default function Register() {
   const [step, setStep] = useState("role");
@@ -52,78 +53,6 @@ export default function Register() {
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const navigate = useNavigate();
   const { toast } = useToast();
-
-  const resolveCountryCode = async () => {
-    const cached = sessionStorage.getItem("geo_country_code");
-    const cachedProvider = sessionStorage.getItem("geo_provider");
-    const cachedIp = sessionStorage.getItem("geo_ip");
-    if (cached) {
-      return { countryCode: cached, provider: cachedProvider || "cache", ip: cachedIp || null };
-    }
-
-    const fetchJsonWithTimeout = async (url) => {
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 6000);
-      try {
-        const res = await fetch(url, { signal: controller.signal });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return await res.json();
-      } finally {
-        window.clearTimeout(timeout);
-      }
-    };
-
-    const providers = [
-      {
-        name: "country.is",
-        url: "https://api.country.is/",
-        pick: (d) => d?.country ?? null,
-        ip: (d) => d?.ip ?? null,
-        error: (d) => d?.message,
-      },
-      {
-        name: "ipwho.is",
-        url: "https://ipwho.is/?fields=success,message,country_code",
-        pick: (d) => (d?.success ? d?.country_code : null),
-        ip: (d) => d?.ip ?? null,
-        error: (d) => d?.message,
-      },
-      {
-        name: "ipapi.co",
-        url: "https://ipapi.co/json/",
-        pick: (d) => d?.country_code ?? null,
-        ip: (d) => d?.ip ?? null,
-        error: (d) => d?.error ? String(d?.reason ?? "Geo lookup failed") : null,
-      },
-      {
-        name: "freeipapi.com",
-        url: "https://freeipapi.com/api/json/",
-        pick: (d) => d?.countryCode ?? null,
-        ip: (d) => d?.ipAddress ?? d?.ip ?? null,
-        error: (d) => d?.message,
-      },
-    ];
-
-    let lastError = "";
-    for (const p of providers) {
-      try {
-        const data = await fetchJsonWithTimeout(p.url);
-        const code = p.pick(data);
-        if (code) {
-          const ip = typeof p.ip === "function" ? p.ip(data) : null;
-          sessionStorage.setItem("geo_country_code", code);
-          sessionStorage.setItem("geo_provider", p.name);
-          if (ip) sessionStorage.setItem("geo_ip", ip);
-          return { countryCode: code, provider: p.name, ip };
-        }
-        lastError = p.error(data) || lastError;
-      } catch (err) {
-        lastError = err?.message || String(err);
-      }
-    }
-
-    return { countryCode: null, provider: null, ip: null, error: lastError || "Geo lookup failed" };
-  };
 
   const ensureFreelancerEligibilityOrToast = async () => {
     setIsRoleChecking(true);

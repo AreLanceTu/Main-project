@@ -7,9 +7,12 @@ import { useNavigate } from "react-router-dom";
 import { auth } from "@/firebase";
 import { getUserRole, setUserRole } from "@/auth/role";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
+import { ensureFreelancerEligibility } from "@/lib/geo";
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [userUid, setUserUid] = useState(null);
   const [role, setRole] = useState(null);
 
@@ -23,8 +26,22 @@ export default function Dashboard() {
 
   const effectiveRole = role ?? "client";
 
-  const switchToFreelancer = () => {
+  const switchToFreelancer = async () => {
     if (!userUid) return;
+
+    const check = await ensureFreelancerEligibility();
+    if (!check.ok) {
+      toast({
+        title: check.reason === "not_india" ? "Freelancer access restricted" : "Couldn’t verify your location",
+        description:
+          check.reason === "not_india"
+            ? "To use the freelancer dashboard, you must be in India (based on your IP address)."
+            : "We couldn’t detect your country from your IP. Please try again (and disable ad-blockers/VPN if enabled).",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setUserRole(userUid, "freelancer");
     setRole("freelancer");
     navigate("/freelancer-dashboard");
@@ -46,7 +63,7 @@ export default function Dashboard() {
 
           {effectiveRole !== "freelancer" ? (
             <div className="mt-6">
-              <Button onClick={switchToFreelancer}>Switch to freelancer dashboard</Button>
+              <Button onClick={() => void switchToFreelancer()}>Switch to freelancer dashboard</Button>
             </div>
           ) : (
             <div className="mt-6">

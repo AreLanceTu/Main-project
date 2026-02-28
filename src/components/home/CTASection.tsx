@@ -6,9 +6,12 @@ import { Button } from "@/components/ui/button";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "@/firebase";
 import { getUserRole, setUserRole } from "@/auth/role";
+import { useToast } from "@/hooks/use-toast";
+import { ensureFreelancerEligibility } from "@/lib/geo";
 
 const CTASection = () => {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [userUid, setUserUid] = useState<string | null>(null);
   const [userRole, setUserRoleState] = useState<string | null>(null);
 
@@ -22,8 +25,22 @@ const CTASection = () => {
 
   const effectiveRole = useMemo(() => userRole ?? "client", [userRole]);
 
-  const switchToFreelancer = () => {
+  const switchToFreelancer = async () => {
     if (!userUid) return;
+
+    const check = await ensureFreelancerEligibility();
+    if (!check.ok) {
+      toast({
+        title: check.reason === "not_india" ? "Freelancer access restricted" : "Couldn’t verify your location",
+        description:
+          check.reason === "not_india"
+            ? "To use the freelancer dashboard, you must be in India (based on your IP address)."
+            : "We couldn’t detect your country from your IP. Please try again (and disable ad-blockers/VPN if enabled).",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setUserRole(userUid, "freelancer");
     setUserRoleState("freelancer");
     navigate("/freelancer-dashboard");

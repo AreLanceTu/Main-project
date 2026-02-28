@@ -17,6 +17,8 @@ import {
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { auth, db } from "@/firebase";
 import { getUserRole, roleDefaultDashboardPath, setUserRole } from "@/auth/role";
+import { useToast } from "@/hooks/use-toast";
+import { ensureFreelancerEligibility } from "@/lib/geo";
 
 const Navbar = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -28,6 +30,7 @@ const Navbar = () => {
   const [userRole, setUserRoleState] = useState<string | null>(null);
   const [userPhotoUrl, setUserPhotoUrl] = useState<string | null>(null);
   const [userUsername, setUserUsername] = useState<string | null>(null);
+  const { toast } = useToast();
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -72,8 +75,24 @@ const Navbar = () => {
 
   const showBecomeSeller = userRole !== "freelancer";
 
-  const handleSwitchRole = (nextRole: "client" | "freelancer") => {
+  const handleSwitchRole = async (nextRole: "client" | "freelancer") => {
     if (!userUid) return;
+
+    if (nextRole === "freelancer") {
+      const check = await ensureFreelancerEligibility();
+      if (!check.ok) {
+        toast({
+          title: check.reason === "not_india" ? "Freelancer access restricted" : "Couldn’t verify your location",
+          description:
+            check.reason === "not_india"
+              ? "To use the freelancer dashboard, you must be in India (based on your IP address)."
+              : "We couldn’t detect your country from your IP. Please try again (and disable ad-blockers/VPN if enabled).",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+
     setUserRole(userUid, nextRole);
     setUserRoleState(nextRole);
     navigate(roleDefaultDashboardPath(nextRole));
@@ -221,7 +240,7 @@ const Navbar = () => {
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
                       onClick={() =>
-                        handleSwitchRole(userRole === "freelancer" ? "client" : "freelancer")
+                        void handleSwitchRole(userRole === "freelancer" ? "client" : "freelancer")
                       }
                       className="cursor-pointer"
                     >

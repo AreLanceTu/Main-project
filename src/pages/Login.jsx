@@ -16,6 +16,7 @@ import {
 import { auth, db } from "@/firebase";
 import { getUserRole, roleDefaultDashboardPath, consumePendingRole, setUserRole } from "@/auth/role";
 import { ensureUserProfile } from "@/lib/userProfile";
+import { ensureFreelancerEligibility } from "@/lib/geo";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -52,9 +53,23 @@ export default function Login() {
 
       // If a role was selected earlier (e.g. from Register), persist it for this user.
       const pendingRole = consumePendingRole();
-      if (pendingRole) {
-        setUserRole(credential.user.uid, pendingRole);
+      if (pendingRole === "freelancer") {
+        const check = await ensureFreelancerEligibility();
+        if (!check.ok) {
+          toast({
+            title:
+              check.reason === "not_india" ? "Freelancer sign-up restricted" : "Couldn’t verify your location",
+            description:
+              check.reason === "not_india"
+                ? "To register as a freelancer, you must be in India (based on your IP address)."
+                : "We couldn’t detect your country from your IP. Please try again (and disable ad-blockers/VPN if enabled).",
+            variant: "destructive",
+          });
+          return;
+        }
       }
+
+      if (pendingRole) setUserRole(credential.user.uid, pendingRole);
 
       // Ensure Firestore user profile exists for username search.
       try {
