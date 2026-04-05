@@ -5,6 +5,14 @@ export type GeoCountryResult = {
   error?: string;
 };
 
+export type GeoResolveOptions = {
+  /**
+   * When true (default), uses sessionStorage cache if present.
+   * Set to false for security-sensitive flows like freelancer registration.
+   */
+  useCache?: boolean;
+};
+
 const CACHE_COUNTRY_KEY = "geo_country_code";
 const CACHE_PROVIDER_KEY = "geo_provider";
 const CACHE_IP_KEY = "geo_ip";
@@ -21,12 +29,13 @@ async function fetchJsonWithTimeout(url: string, timeoutMs = 6000): Promise<any>
   }
 }
 
-export async function resolveCountryCode(): Promise<GeoCountryResult> {
+export async function resolveCountryCode(options: GeoResolveOptions = {}): Promise<GeoCountryResult> {
+  const useCache = options.useCache !== false;
   const cached = sessionStorage.getItem(CACHE_COUNTRY_KEY);
   const cachedProvider = sessionStorage.getItem(CACHE_PROVIDER_KEY);
   const cachedIp = sessionStorage.getItem(CACHE_IP_KEY);
 
-  if (cached) {
+  if (useCache && cached) {
     return {
       countryCode: cached,
       provider: cachedProvider || "cache",
@@ -97,11 +106,11 @@ export async function resolveCountryCode(): Promise<GeoCountryResult> {
   };
 }
 
-export async function ensureFreelancerEligibility(): Promise<
+export async function ensureFreelancerEligibility(options: GeoResolveOptions = {}): Promise<
   | { ok: true; geo: GeoCountryResult }
   | { ok: false; reason: "unknown" | "not_india"; geo: GeoCountryResult }
 > {
-  const geo = await resolveCountryCode();
+  const geo = await resolveCountryCode(options);
   if (!geo.countryCode) return { ok: false, reason: "unknown", geo };
   if (geo.countryCode !== "IN") return { ok: false, reason: "not_india", geo };
   return { ok: true, geo };

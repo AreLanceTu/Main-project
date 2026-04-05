@@ -25,6 +25,8 @@ export type PresenceState = {
  * even on hard disconnects.
  */
 export function startRtdbPresence(): () => void {
+  if (!rtdb) return () => undefined;
+
   let stopConnectedListener: null | (() => void) = null;
   let currentStatusRef: DatabaseReference | null = null;
 
@@ -49,16 +51,18 @@ export function startRtdbPresence(): () => void {
       if (!connected) return;
 
       // When we lose connection, mark offline.
-      void onDisconnect(statusRef).set({
-        state: "offline",
-        last_changed: rtdbServerTimestamp(),
-      });
+      void onDisconnect(statusRef)
+        .set({
+          state: "offline",
+          last_changed: rtdbServerTimestamp(),
+        })
+        .catch(() => undefined);
 
       // Mark ourselves online.
       void set(statusRef, {
         state: "online",
         last_changed: rtdbServerTimestamp(),
-      });
+      }).catch(() => undefined);
     });
 
     stopConnectedListener = () => unsubConnected();
@@ -91,6 +95,10 @@ export function startRtdbPresence(): () => void {
 }
 
 export function subscribePresence(uid: string, cb: (p: PresenceState | null) => void): () => void {
+  if (!rtdb) {
+    cb(null);
+    return () => undefined;
+  }
   const statusRef = ref(rtdb, `/status/${uid}`);
   return onValue(
     statusRef,

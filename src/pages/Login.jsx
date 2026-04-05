@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Helmet } from "react-helmet-async";
 import { motion } from "framer-motion";
@@ -7,16 +7,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import {
   GoogleAuthProvider,
   signInWithEmailAndPassword,
   signInWithPopup,
 } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
 import { auth, db } from "@/firebase";
 import { getUserRole, roleDefaultDashboardPath, consumePendingRole, setUserRole } from "@/auth/role";
 import { ensureUserProfile } from "@/lib/userProfile";
-import { ensureFreelancerEligibility } from "@/lib/geo";
+import { ensureFreelancerEligibility, resolveCountryCode } from "@/lib/geo";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -28,10 +30,33 @@ export default function Login() {
   const location = useLocation();
   const { toast } = useToast();
 
+  const [geoCountryCode, setGeoCountryCode] = useState(null);
+  const [geoResolved, setGeoResolved] = useState(false);
+
   const nextPath = useMemo(() => {
     // AuthGuard sets state.from when it redirects to /login.
     return location.state?.from || null;
   }, [location.state]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const geo = await resolveCountryCode();
+        if (cancelled) return;
+        setGeoCountryCode(geo.countryCode ?? null);
+      } catch {
+        if (cancelled) return;
+        setGeoCountryCode(null);
+      } finally {
+        if (cancelled) return;
+        setGeoResolved(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const navigateAfterLogin = (user) => {
     // If the guard asked us to return to a specific protected URL, honor it.
@@ -40,9 +65,22 @@ export default function Login() {
       return;
     }
 
-    // Otherwise, route by role.
+    // Otherwise, route by role (synced from Firestore where possible).
     const role = getUserRole(user?.uid);
     navigate(roleDefaultDashboardPath(role), { replace: true });
+  };
+
+  const syncRoleFromFirestore = async (uid) => {
+    if (!uid) return "client";
+    try {
+      const snap = await getDoc(doc(db, "freelancers", uid));
+      const role = snap.exists() ? "freelancer" : "client";
+      setUserRole(uid, role);
+      return role;
+    } catch {
+      // Fall back to local role, defaulting to client.
+      return getUserRole(uid) || "client";
+    }
   };
 
   const handleContinueWithGoogle = async () => {
@@ -91,6 +129,8 @@ export default function Login() {
         title: "Login Successful",
         description: "Welcome back to GigFlow!",
       });
+
+      await syncRoleFromFirestore(credential.user.uid);
       navigateAfterLogin(credential.user);
     } catch (err) {
       toast({
@@ -135,6 +175,8 @@ export default function Login() {
       } catch (e) {
         console.error("Failed to ensure user profile", e);
       }
+
+      await syncRoleFromFirestore(user.uid);
 
       navigateAfterLogin(user);
     } catch (err) {
@@ -182,6 +224,18 @@ export default function Login() {
               <p className="text-muted-foreground">
                 Sign in to your account to continue
               </p>
+
+              {geoResolved && geoCountryCode && geoCountryCode !== "IN" ? (
+                <div className="mt-4">
+                  <Alert>
+                    <AlertTitle>Freelancer registration is India-only</AlertTitle>
+                    <AlertDescription>
+                      Your IP appears to be outside India, so “Become a freelancer” will be locked on this login.
+                      You can still use GigFlow as a client from anywhere.
+                    </AlertDescription>
+                  </Alert>
+                </div>
+              ) : null}
             </div>
 
             <Button

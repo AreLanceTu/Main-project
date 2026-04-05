@@ -18,7 +18,7 @@ import {
 import Navbar from "@/components/layout/Navbar";
 import Footer from "@/components/layout/Footer";
 import { auth, db } from "@/firebase";
-import { getUserRole } from "@/auth/role";
+import { getUserRole, setUserRole as setLocalUserRole } from "@/auth/role";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -109,6 +109,8 @@ export default function ClientDashboard() {
   const [userEmail, setUserEmail] = useState(null);
   const [userUid, setUserUid] = useState(null);
   const [userRole, setUserRole] = useState(null);
+  const [freelancerRegistered, setFreelancerRegistered] = useState(false);
+  const [becomingFreelancer, setBecomingFreelancer] = useState(false);
   const [username, setUsername] = useState(null);
   const [usernameDraft, setUsernameDraft] = useState("");
   const [usernameSaving, setUsernameSaving] = useState(false);
@@ -225,6 +227,37 @@ export default function ClientDashboard() {
     });
     return unsub;
   }, []);
+
+  useEffect(() => {
+    if (!userUid) {
+      setFreelancerRegistered(false);
+      return undefined;
+    }
+
+    const unsub = onSnapshot(
+      doc(db, "freelancers", userUid),
+      (snap) => {
+        const ok = snap.exists();
+        setFreelancerRegistered(ok);
+        if (!ok && userRole === "freelancer") {
+          setLocalUserRole(userUid, "client");
+          setUserRole("client");
+        }
+      },
+      () => {
+        setFreelancerRegistered(false);
+      },
+    );
+
+    return unsub;
+  }, [userRole, userUid]);
+
+  async function becomeFreelancer() {
+    if (!userUid || becomingFreelancer) return;
+    // Funnel through the freelancer registration page.
+    // That page redirects to the freelancer dashboard if already registered.
+    navigate("/freelancer-register");
+  }
 
   async function payInvoice(invoice) {
     if (!invoice || payingInvoiceId) return;
@@ -607,6 +640,22 @@ export default function ClientDashboard() {
                 Green, secure marketplace experience
               </span>
             </div>
+
+            {!freelancerRegistered ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Become a freelancer</CardTitle>
+                  <CardDescription>
+                    Freelancer registration is available only from India (based on your IP). You can keep using client features globally.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-wrap items-center gap-2">
+                  <Button type="button" onClick={() => void becomeFreelancer()} disabled={!userUid || becomingFreelancer}>
+                    {becomingFreelancer ? "Checking…" : "Become a freelancer"}
+                  </Button>
+                </CardContent>
+              </Card>
+            ) : null}
           </header>
 
           <Separator className="my-2" />

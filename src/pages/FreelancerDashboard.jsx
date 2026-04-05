@@ -190,51 +190,7 @@ export default function FreelancerDashboard() {
   const [proEndsAt, setProEndsAt] = useState(null);
   const [upgradingPro, setUpgradingPro] = useState(false);
 
-  const [gigs, setGigs] = useState(() => {
-    const stored = listStoredGigs();
-    if (stored.length) {
-      return stored.map((g) => ({
-        id: g.gig_id,
-        title: g.title,
-        thumbnailUrl: g.cover_image_url,
-        status: "Active",
-        impressions: 0,
-        clicks: 0,
-        orders: 0,
-        sellerId: g.seller_id,
-      }));
-    }
-
-    return [
-      {
-        id: "gig-1",
-        title: "I will design a modern logo for your brand",
-        thumbnailUrl: "",
-        status: "Active",
-        impressions: 12450,
-        clicks: 610,
-        orders: 32,
-      },
-      {
-        id: "gig-2",
-        title: "I will build a responsive landing page in React",
-        thumbnailUrl: "",
-        status: "Paused",
-        impressions: 8020,
-        clicks: 301,
-        orders: 12,
-      },
-      {
-        id: "gig-3",
-        title: "I will write SEO blog posts for your niche",
-        thumbnailUrl: "",
-        status: "Draft",
-        impressions: 0,
-        clicks: 0,
-        orders: 0,
-      },
-    ];
-  });
+  const [gigs, setGigs] = useState(() => []);
 
   const [orders, setOrders] = useState(() => []);
 
@@ -312,10 +268,7 @@ export default function FreelancerDashboard() {
   const [withdrawAmount, setWithdrawAmount] = useState(50);
 
   const [analyticsDays, setAnalyticsDays] = useState("30");
-  const [selectedGigId, setSelectedGigId] = useState(() => {
-    const stored = listStoredGigs();
-    return stored[0]?.gig_id || "gig-1";
-  });
+  const [selectedGigId, setSelectedGigId] = useState("");
 
   const [gigForm, setGigForm] = useState(() => ({
     editingGigId: null,
@@ -428,6 +381,53 @@ export default function FreelancerDashboard() {
     });
     return unsub;
   }, []);
+
+  useEffect(() => {
+    if (!userUid) {
+      setGigs([]);
+      setSelectedGigId("");
+      return undefined;
+    }
+
+    const q = query(
+      collection(db, "gigs"),
+      where("seller_id", "==", userUid),
+      limit(50),
+    );
+
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const items = snap.docs.map((d) => {
+          const data = d.data() || {};
+          const gigId = String(data.gig_id || d.id);
+          return {
+            id: gigId,
+            title: String(data.title || "Untitled gig"),
+            thumbnailUrl: String(data.cover_image_url || ""),
+            status: "Active",
+            impressions: 0,
+            clicks: 0,
+            orders: 0,
+            sellerId: String(data.seller_id || ""),
+          };
+        });
+
+        setGigs(items);
+        setSelectedGigId((prev) => {
+          if (!items.length) return "";
+          if (prev && items.some((g) => g.id === prev)) return prev;
+          return items[0].id;
+        });
+      },
+      () => {
+        setGigs([]);
+        setSelectedGigId("");
+      },
+    );
+
+    return unsub;
+  }, [userUid]);
 
   useEffect(() => {
     if (!userUid) {
@@ -1723,7 +1723,7 @@ export default function FreelancerDashboard() {
                 <div className="space-y-4">
                   <div className="flex items-center justify-between gap-3 flex-wrap">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <Select value={selectedGigId} onValueChange={(v) => setSelectedGigId(v)}>
+                      <Select value={selectedGigId || ""} onValueChange={(v) => setSelectedGigId(v)}>
                         <SelectTrigger className="w-full sm:w-[280px]">
                           <SelectValue placeholder="Select gig" />
                         </SelectTrigger>

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { Helmet } from "react-helmet-async";
 import { motion } from "framer-motion";
 import {
@@ -10,8 +10,6 @@ import {
   EyeOff,
   ArrowRight,
   Chrome,
-  Briefcase,
-  UserCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,20 +25,14 @@ import {
 } from "firebase/auth";
 import { auth, db } from "@/firebase";
 import {
-  consumePendingRole,
   roleDefaultDashboardPath,
-  setPendingRole,
   setUserRole,
 } from "@/auth/role";
 import { ensureUserProfile, isValidUsername, normalizeUsername } from "@/lib/userProfile";
-import { resolveCountryCode } from "@/lib/geo";
 
 export default function Register() {
-  const [step, setStep] = useState("role");
-  const [role, setRole] = useState(null);
-  const [isRoleChecking, setIsRoleChecking] = useState(false);
-  const [geoDebug, setGeoDebug] = useState(null);
-  const [searchParams] = useSearchParams();
+  // Users always register as a client. Freelancer is an upgrade after login (India-only).
+  const role = "client";
   const [formData, setFormData] = useState({
     fullName: "",
     username: "",
@@ -54,102 +46,18 @@ export default function Register() {
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const ensureFreelancerEligibilityOrToast = async () => {
-    setIsRoleChecking(true);
-    try {
-      const result = await resolveCountryCode();
-      if (import.meta?.env?.DEV) {
-        setGeoDebug(result);
-        // eslint-disable-next-line no-console
-        console.info("[geo] result", result);
-      }
-
-      const { countryCode } = result;
-      if (!countryCode) {
-        toast({
-          title: "Couldn’t verify your location",
-          description:
-            "We couldn’t detect your country from your IP. Please try again (and disable ad-blockers/VPN if enabled).",
-          variant: "destructive",
-        });
-        return false;
-      }
-
-      if (countryCode !== "IN") {
-        toast({
-          title: "Freelancer sign-up restricted",
-          description: "To register as a freelancer, you must be in India (based on your IP address).",
-          variant: "destructive",
-        });
-        return false;
-      }
-      return true;
-    } finally {
-      setIsRoleChecking(false);
-    }
-  };
-
-  useEffect(() => {
-    const roleFromUrl = searchParams.get("role");
-    if (roleFromUrl !== "freelancer" && roleFromUrl !== "client") return;
-
-    (async () => {
-      if (roleFromUrl === "freelancer") {
-        const ok = await ensureFreelancerEligibilityOrToast();
-        if (!ok) {
-          setRole(null);
-          setStep("role");
-          return;
-        }
-      }
-      setRole(roleFromUrl);
-      setStep("form");
-    })();
-  }, [searchParams]);
-
-  const handleRoleSelect = async (selectedRole) => {
-    if (selectedRole === "freelancer") {
-      const ok = await ensureFreelancerEligibilityOrToast();
-      if (!ok) return;
-    }
-
-    setRole(selectedRole);
-    setStep("form");
-  };
-
   const handleContinueWithGoogle = async () => {
-    // Role selection is app-specific; keep it but store locally.
-    if (!role) {
-      toast({
-        title: "Select your role first",
-        description: "Choose client or freelancer before continuing with Google.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (role === "freelancer") {
-      const ok = await ensureFreelancerEligibilityOrToast();
-      if (!ok) return;
-    }
-
     setIsGoogleLoading(true);
     try {
-      setPendingRole(role);
-
       const provider = new GoogleAuthProvider();
       const credential = await signInWithPopup(auth, provider);
 
-      // Persist role for the created/signed-in user.
-      const pendingRole = consumePendingRole() || role;
-      if (pendingRole) {
-        setUserRole(credential.user.uid, pendingRole);
-      }
+      setUserRole(credential.user.uid, role);
 
       // Ensure Firestore user profile exists (for chat search by username).
       try {
         await ensureUserProfile(db, credential.user, {
-          role: pendingRole,
+          role,
           fullName: credential.user.displayName || "",
         });
       } catch (e) {
@@ -166,7 +74,7 @@ export default function Register() {
         title: "Account Created!",
         description: "Welcome to GigFlow.",
       });
-      navigate(roleDefaultDashboardPath(pendingRole), { replace: true });
+      navigate(roleDefaultDashboardPath(role), { replace: true });
     } catch (err) {
       toast({
         title: "Google sign-up failed",
@@ -188,20 +96,6 @@ export default function Register() {
         variant: "destructive",
       });
       return;
-    }
-
-    if (!role) {
-      toast({
-        title: "Select your role first",
-        description: "Choose client or freelancer to continue.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (role === "freelancer") {
-      const ok = await ensureFreelancerEligibilityOrToast();
-      if (!ok) return;
     }
 
     setIsLoading(true);
@@ -285,153 +179,61 @@ export default function Register() {
               <span className="text-2xl font-bold text-foreground">GigFlow</span>
             </Link>
 
-            {step === "role" ? (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 0.1 }}
-              >
-                <div className="mb-8">
-                  <h1 className="text-3xl font-bold text-foreground mb-2">
-                    Join GigFlow
-                  </h1>
-                  <p className="text-muted-foreground">
-                    How do you want to use GigFlow?
-                  </p>
-                </div>
-
-                <div className="space-y-4">
-                  {isRoleChecking ? (
-                    <div className="text-sm text-muted-foreground">
-                      Checking your location…
-                    </div>
-                  ) : null}
-
-                  {import.meta?.env?.DEV && geoDebug ? (
-                    <div className="text-xs text-muted-foreground">
-                      Geo debug: {geoDebug?.countryCode ?? "?"}
-                      {geoDebug?.ip ? ` · ${geoDebug.ip}` : ""}
-                      {geoDebug?.provider ? ` · via ${geoDebug.provider}` : ""}
-                      {geoDebug?.error ? ` · error: ${geoDebug.error}` : ""}
-                    </div>
-                  ) : null}
-                  <button
-                    onClick={() => handleRoleSelect("client")}
-                    className="w-full p-6 rounded-2xl border-2 border-border hover:border-primary bg-card hover:bg-secondary transition-all text-left group"
-                    type="button"
-                    disabled={isRoleChecking}
-                  >
-                    <div className="flex items-start gap-4">
-                      <div className="w-14 h-14 rounded-xl bg-secondary group-hover:bg-primary flex items-center justify-center transition-colors">
-                        <Briefcase className="w-7 h-7 text-primary group-hover:text-primary-foreground transition-colors" />
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="text-lg font-semibold text-foreground mb-1">
-                          I'm a client, hiring for a project
-                        </h3>
-                        <p className="text-sm text-muted-foreground">
-                          Find and hire talented freelancers for your business
-                          needs
-                        </p>
-                      </div>
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() => handleRoleSelect("freelancer")}
-                    className="w-full p-6 rounded-2xl border-2 border-border hover:border-primary bg-card hover:bg-secondary transition-all text-left group"
-                    type="button"
-                    disabled={isRoleChecking}
-                  >
-                    <div className="flex items-start gap-4">
-                      <div className="w-14 h-14 rounded-xl bg-secondary group-hover:bg-primary flex items-center justify-center transition-colors">
-                        <UserCircle className="w-7 h-7 text-primary group-hover:text-primary-foreground transition-colors" />
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="text-lg font-semibold text-foreground mb-1">
-                          I'm a freelancer, looking for work
-                        </h3>
-                        <p className="text-sm text-muted-foreground">
-                          Showcase your skills and start earning on your own
-                          terms
-                        </p>
-                      </div>
-                    </div>
-                  </button>
-                </div>
-
-                <p className="mt-8 text-center text-muted-foreground">
-                  Already have an account?{" "}
-                  <Link
-                    to="/login"
-                    className="text-primary font-semibold hover:underline"
-                  >
-                    Sign in
-                  </Link>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.1 }}
+            >
+              <div className="mb-8">
+                <h1 className="text-3xl font-bold text-foreground mb-2">
+                  Create your account
+                </h1>
+                <p className="text-muted-foreground">
+                  Create a client account. You can become a freelancer after login (India only).
                 </p>
-              </motion.div>
-            ) : (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                <button
-                  onClick={() => setStep("role")}
-                  className="text-sm text-muted-foreground hover:text-foreground mb-6 flex items-center gap-1"
-                  type="button"
-                >
-                  ← Back to role selection
-                </button>
+              </div>
 
-                <div className="mb-8">
-                  <h1 className="text-3xl font-bold text-foreground mb-2">
-                    Create your account
-                  </h1>
-                  <p className="text-muted-foreground">
-                    {role === "client"
-                      ? "Start hiring talented freelancers today"
-                      : "Begin your freelancing journey with GigFlow"}
-                  </p>
-                </div>
+              <Button
+                variant="outline"
+                className="w-full h-12 mb-6"
+                type="button"
+                onClick={handleContinueWithGoogle}
+                disabled={isGoogleLoading}
+              >
+                <Chrome className="w-5 h-5 mr-2" />
+                {isGoogleLoading ? "Connecting..." : "Continue with Google"}
+              </Button>
 
-                <Button
-                  variant="outline"
-                  className="w-full h-12 mb-6"
-                  type="button"
-                  onClick={handleContinueWithGoogle}
-                  disabled={isGoogleLoading}
-                >
-                  <Chrome className="w-5 h-5 mr-2" />
-                  {isGoogleLoading ? "Connecting..." : "Continue with Google"}
-                </Button>
+              <div className="relative mb-6">
+                <Separator />
+                <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-background px-4 text-sm text-muted-foreground">
+                  or continue with email
+                </span>
+              </div>
 
-                <div className="relative mb-6">
-                  <Separator />
-                  <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-background px-4 text-sm text-muted-foreground">
-                    or continue with email
-                  </span>
-                </div>
-
-                <form onSubmit={handleSubmit} className="space-y-5">
-                  <div className="space-y-2">
-                    <Label htmlFor="fullName">Full Name</Label>
-                    <div className="relative">
-                      <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
-                      <Input
-                        id="fullName"
-                        type="text"
-                        placeholder="Enter your full name"
-                        value={formData.fullName}
-                        onChange={(e) =>
-                          setFormData({ ...formData, fullName: e.target.value })
-                        }
-                        className="pl-10 h-12"
-                        required
-                      />
-                    </div>
+              <form onSubmit={handleSubmit} className="space-y-5">
+                <div className="space-y-2">
+                  <Label htmlFor="fullName">Full Name</Label>
+                  <div className="relative">
+                    <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
+                    <Input
+                      id="fullName"
+                      type="text"
+                      placeholder="Enter your full name"
+                      value={formData.fullName}
+                      onChange={(e) =>
+                        setFormData({ ...formData, fullName: e.target.value })
+                      }
+                      className="pl-10 h-12"
+                      required
+                    />
                   </div>
+                </div>
 
                   <div className="space-y-2">
                     <Label htmlFor="username">Username</Label>
                     <div className="relative">
-                      <UserCircle className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
+                      <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
                       <Input
                         id="username"
                         type="text"
@@ -566,7 +368,6 @@ export default function Register() {
                   </Link>
                 </p>
               </motion.div>
-            )}
           </motion.div>
         </div>
 

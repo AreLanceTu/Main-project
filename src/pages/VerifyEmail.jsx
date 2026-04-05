@@ -5,9 +5,11 @@ import { motion } from "framer-motion";
 import { Mail, ArrowRight, RefreshCw, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { auth } from "@/firebase";
+import { auth, db } from "@/firebase";
 import { onAuthStateChanged, reload, sendEmailVerification, signOut } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
 import { getUserRole, roleDefaultDashboardPath } from "@/auth/role";
+import { setUserRole } from "@/auth/role";
 
 export default function VerifyEmail() {
   const { toast } = useToast();
@@ -22,8 +24,16 @@ export default function VerifyEmail() {
 
       // If the user is already verified, no need to stay here.
       if (nextUser?.emailVerified) {
-        const role = getUserRole(nextUser.uid);
-        navigate(roleDefaultDashboardPath(role), { replace: true });
+        (async () => {
+          try {
+            const snap = await getDoc(doc(db, "freelancers", nextUser.uid));
+            setUserRole(nextUser.uid, snap.exists() ? "freelancer" : "client");
+          } catch {
+            // ignore
+          }
+          const role = getUserRole(nextUser.uid);
+          navigate(roleDefaultDashboardPath(role), { replace: true });
+        })();
       }
     });
 
@@ -74,6 +84,12 @@ export default function VerifyEmail() {
           title: "Email verified",
           description: "You're all set.",
         });
+        try {
+          const snap = await getDoc(doc(db, "freelancers", auth.currentUser.uid));
+          setUserRole(auth.currentUser.uid, snap.exists() ? "freelancer" : "client");
+        } catch {
+          // ignore
+        }
         const role = getUserRole(auth.currentUser.uid);
         navigate(roleDefaultDashboardPath(role), { replace: true });
         return;

@@ -18,7 +18,6 @@ import { onAuthStateChanged, signOut } from "firebase/auth";
 import { auth, db } from "@/firebase";
 import { getUserRole, roleDefaultDashboardPath, setUserRole } from "@/auth/role";
 import { useToast } from "@/hooks/use-toast";
-import { ensureFreelancerEligibility } from "@/lib/geo";
 
 const Navbar = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -28,6 +27,7 @@ const Navbar = () => {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userUid, setUserUid] = useState<string | null>(null);
   const [userRole, setUserRoleState] = useState<string | null>(null);
+  const [freelancerRegistered, setFreelancerRegistered] = useState(false);
   const [userPhotoUrl, setUserPhotoUrl] = useState<string | null>(null);
   const [userUsername, setUserUsername] = useState<string | null>(null);
   const { toast } = useToast();
@@ -73,22 +73,43 @@ const Navbar = () => {
     return unsub;
   }, [userUid]);
 
-  const showBecomeSeller = userRole !== "freelancer";
+  useEffect(() => {
+    if (!userUid) {
+      setFreelancerRegistered(false);
+      return undefined;
+    }
+
+    const unsub = onSnapshot(
+      doc(db, "freelancers", userUid),
+      (snap) => {
+        const ok = snap.exists();
+        setFreelancerRegistered(ok);
+        // Keep local role in sync so existing UI that reads localStorage behaves.
+        // Do not force-switch the current view; only correct impossible states.
+        if (!ok && userRole === "freelancer") {
+          setUserRole(userUid, "client");
+          setUserRoleState("client");
+        }
+      },
+      () => {
+        setFreelancerRegistered(false);
+      },
+    );
+
+    return unsub;
+  }, [userRole, userUid]);
+
+  const showBecomeSeller = !userEmail;
 
   const handleSwitchRole = async (nextRole: "client" | "freelancer") => {
     if (!userUid) return;
 
     if (nextRole === "freelancer") {
-      const check = await ensureFreelancerEligibility();
-      if (!check.ok) {
-        toast({
-          title: check.reason === "not_india" ? "Freelancer access restricted" : "Couldn’t verify your location",
-          description:
-            check.reason === "not_india"
-              ? "To use the freelancer dashboard, you must be in India (based on your IP address)."
-              : "We couldn’t detect your country from your IP. Please try again (and disable ad-blockers/VPN if enabled).",
-          variant: "destructive",
-        });
+      // Always funnel through the registration page.
+      // If the user is already registered, that page will immediately redirect to the dashboard.
+      if (!freelancerRegistered) {
+        navigate("/freelancer-register");
+        setIsMenuOpen(false);
         return;
       }
     }
@@ -204,7 +225,7 @@ const Navbar = () => {
 
               {showBecomeSeller ? (
                 <Button variant="ghost" asChild>
-                  <Link to="/register?role=freelancer">Become a Seller</Link>
+                  <Link to="/register">Sign up</Link>
                 </Button>
               ) : null}
             </div>
@@ -246,7 +267,9 @@ const Navbar = () => {
                     >
                       {userRole === "freelancer"
                         ? "Switch to client dashboard"
-                        : "Switch to freelancer dashboard"}
+                        : freelancerRegistered
+                          ? "Switch to freelancer dashboard"
+                          : "Become a freelancer"}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem asChild>
@@ -398,7 +421,9 @@ const Navbar = () => {
                     >
                       {userRole === "freelancer"
                         ? "Switch to client dashboard"
-                        : "Switch to freelancer dashboard"}
+                        : freelancerRegistered
+                          ? "Switch to freelancer dashboard"
+                          : "Become a freelancer"}
                     </Button>
                     <Button variant="outline" asChild className="w-full">
                       <Link to="/account" onClick={() => setIsMenuOpen(false)}>

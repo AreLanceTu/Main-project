@@ -15,6 +15,7 @@ import JobPost from "./pages/JobPost";
 import AuthGuard from "./components/AuthGuard.jsx";
 import RoleGuard from "./components/RoleGuard.jsx";
 import FreelancerDashboard from "./pages/FreelancerDashboard.jsx";
+import FreelancerRegister from "./pages/FreelancerRegister.jsx";
 import WithdrawalDetails from "./pages/WithdrawalDetails.jsx";
 import Gigs from "./pages/Gigs";
 import Gig from "./pages/Gig";
@@ -73,9 +74,17 @@ const App = () => (
               path="/freelancer-dashboard"
               element={
                 <AuthGuard>
-                  <RoleGuard role="freelancer" redirectTo="/dashboard">
+                  <RoleGuard role="freelancer" redirectTo="/freelancer-register">
                     <FreelancerDashboard />
                   </RoleGuard>
+                </AuthGuard>
+              }
+            />
+            <Route
+              path="/freelancer-register"
+              element={
+                <AuthGuard>
+                  <FreelancerRegister />
                 </AuthGuard>
               }
             />
@@ -83,7 +92,7 @@ const App = () => (
               path="/withdrawal"
               element={
                 <AuthGuard>
-                  <RoleGuard role="freelancer" redirectTo="/dashboard">
+                  <RoleGuard role="freelancer" redirectTo="/freelancer-register">
                     <WithdrawalDetails />
                   </RoleGuard>
                 </AuthGuard>

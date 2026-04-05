@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { onAuthStateChanged } from "firebase/auth";
+import { doc, onSnapshot } from "firebase/firestore";
 
 import { auth } from "@/firebase";
-import { getUserRole } from "@/auth/role";
+import { db } from "@/firebase";
+import { setUserRole } from "@/auth/role";
 
 /**
  * RoleGuard
@@ -12,19 +14,61 @@ import { getUserRole } from "@/auth/role";
  */
 export default function RoleGuard({ role, redirectTo = "/dashboard", children }) {
   const [allowed, setAllowed] = useState(null);
+  const activeUidRef = useRef(null);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
+    let unsubRole = null;
+    let cancelled = false;
+
+    const unsubAuth = onAuthStateChanged(auth, (u) => {
+      // Avoid any flash of previously-allowed content when the auth user changes.
+      setAllowed(null);
+      activeUidRef.current = u?.uid ?? null;
+
+      // Reset any prior subscription.
+      if (unsubRole) {
+        unsubRole();
+        unsubRole = null;
+      }
+
       if (!u) {
         setAllowed(false);
         return;
       }
 
-      const currentRole = getUserRole(u.uid);
-      setAllowed(currentRole === role);
+      // Source of truth: Firestore.
+      // Freelancer access = existence of /freelancers/{uid}.
+      if (role === "freelancer") {
+        const uid = u.uid;
+        unsubRole = onSnapshot(
+          doc(db, "freelancers", uid),
+          (snap) => {
+            // Guard against any stale snapshot callbacks.
+            if (cancelled || activeUidRef.current !== uid) return;
+            const ok = snap.exists();
+            setAllowed(ok);
+            // Keep local routing state in sync for components that still read localStorage.
+            setUserRole(uid, ok ? "freelancer" : "client");
+          },
+          () => {
+            if (cancelled || activeUidRef.current !== uid) return;
+            setAllowed(false);
+            setUserRole(uid, "client");
+          },
+        );
+        return;
+      }
+
+      // For now, any signed-in user can be treated as a client.
+      setAllowed(true);
+      setUserRole(u.uid, "client");
     });
 
-    return unsub;
+    return () => {
+      cancelled = true;
+      if (unsubRole) unsubRole();
+      unsubAuth();
+    };
   }, [role]);
 
   if (allowed === null) return null;

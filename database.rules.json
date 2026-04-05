@@ -2,6 +2,20 @@
   /* Visit https://firebase.google.com/docs/database/security to learn more about security rules. */
   "rules": {
     ".read": false,
-    ".write": false
+    ".write": false,
+
+    "status": {
+      // Presence is stored at /status/{uid}.
+      // Allow authenticated users to read presence (for chat UI),
+      // but only allow a user to write their own presence node.
+      ".read": "auth != null",
+
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid",
+
+        // Optional schema validation.
+        ".validate": "newData.hasChildren(['state','last_changed']) && (newData.child('state').val() === 'online' || newData.child('state').val() === 'offline')"
+      }
+    }
   }
 }

@@ -6,6 +6,11 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isRegisteredFreelancer() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/freelancers/$(request.auth.uid));
+    }
+
     function isMe(uid) {
       return isSignedIn() && request.auth.uid == uid;
     }
@@ -162,7 +167,7 @@ service cloud.firestore {
     }
 
     function isValidServiceWrite(serviceId) {
-      return isSignedIn()
+      return isRegisteredFreelancer()
         && request.resource.data.serviceId == serviceId
         && request.resource.data.freelancerId == request.auth.uid
         && request.resource.data.title is string
@@ -193,7 +198,7 @@ service cloud.firestore {
     }
 
     function isValidGigWrite(gigId) {
-      return isSignedIn()
+      return isRegisteredFreelancer()
         && request.resource.data.gig_id == gigId
         && request.resource.data.seller_id == request.auth.uid
         && request.resource.data.title is string
@@ -326,6 +331,15 @@ service cloud.firestore {
     // - Readable by any authenticated user (so you can show name/photo in chat list)
     // - Writable only by the owner
     match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isMe(userId);
+    }
+
+    // Freelancer registrations
+    // - Existence of /freelancers/{uid} is treated as "registered freelancer"
+    // - Readable by any authenticated user (so the UI can gate dashboards)
+    // - Writable only by the owner
+    match /freelancers/{userId} {
       allow read: if isSignedIn();
       allow create, update, delete: if isMe(userId);
     }
