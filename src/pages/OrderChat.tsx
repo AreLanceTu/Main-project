@@ -25,22 +25,30 @@ import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Progress } from "@/components/ui/progress";
 
 import { auth, db } from "@/firebase";
 import { uploadOrderFiles, type UploadedFile } from "@/lib/orderUploads";
 import { supabaseSignedDownloadUrl } from "@/lib/supabaseStorage";
 import { useToast } from "@/hooks/use-toast";
+import { getStoredGig } from "@/lib/gigStore";
 
 type OrderDoc = {
   orderId: string;
   clientId: string;
   sellerId?: string;
+  gigId?: string;
+  serviceId?: string;
   paymentStatus: string;
   orderStatus: string;
   amountRupees?: number;
   razorpayPaymentId?: string;
   revisionLimit?: number;
   revisionCount?: number;
+  deliveryTimeDays?: number;
+  dueAt?: any;
+  createdAt?: any;
   deliveredAt?: any;
   autoCompleteAt?: any;
 };
@@ -62,6 +70,13 @@ type DeliveryDoc = {
   deliveredAt?: any;
 };
 
+type UserProfileDoc = {
+  username?: string;
+  usernameLower?: string;
+  name?: string;
+  displayName?: string;
+};
+
 function tsToText(ts: any): string {
   try {
     const d = ts?.toDate?.() ?? null;
@@ -70,6 +85,53 @@ function tsToText(ts: any): string {
   } catch {
     return "";
   }
+}
+
+function tsToMillis(ts: any): number | null {
+  try {
+    if (!ts) return null;
+    if (typeof ts?.toMillis === "function") {
+      const n = ts.toMillis();
+      return Number.isFinite(n) ? n : null;
+    }
+    const d = ts?.toDate?.() ?? null;
+    if (d instanceof Date) {
+      const n = d.getTime();
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function formatCountdownParts(ms: number) {
+  const abs = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(abs / (24 * 3600));
+  const hours = Math.floor((abs % (24 * 3600)) / 3600);
+  const minutes = Math.floor((abs % 3600) / 60);
+  const seconds = abs % 60;
+  return { days, hours, minutes, seconds };
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function hash32FNV1a(input: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i += 1) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+function orderNumberDigits(orderId: string): string {
+  const id = String(orderId || "").trim();
+  if (!id) return "";
+  const n = hash32FNV1a(id) % 1_000_000_000; // 9 digits
+  return String(n).padStart(9, "0");
 }
 
 export default function OrderChat() {
@@ -96,6 +158,11 @@ export default function OrderChat() {
 
   const [accepting, setAccepting] = useState(false);
   const [requestingRevision, setRequestingRevision] = useState(false);
+
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  const [buyerUsername, setBuyerUsername] = useState<string | null>(null);
+  const [sellerUsername, setSellerUsername] = useState<string | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -245,6 +312,49 @@ export default function OrderChat() {
 
     return unsub;
   }, [canAccess, orderId]);
+
+  useEffect(() => {
+    if (!order?.clientId) {
+      setBuyerUsername(null);
+      return undefined;
+    }
+
+    const unsub = onSnapshot(
+      doc(db, "users", String(order.clientId)),
+      (snap) => {
+        const data = (snap.data() || {}) as UserProfileDoc;
+        const u = data.username || data.usernameLower || null;
+        setBuyerUsername(u ? String(u) : null);
+      },
+      () => setBuyerUsername(null),
+    );
+
+    return unsub;
+  }, [order?.clientId]);
+
+  useEffect(() => {
+    if (!order?.sellerId) {
+      setSellerUsername(null);
+      return undefined;
+    }
+
+    const unsub = onSnapshot(
+      doc(db, "users", String(order.sellerId)),
+      (snap) => {
+        const data = (snap.data() || {}) as UserProfileDoc;
+        const u = data.username || data.usernameLower || null;
+        setSellerUsername(u ? String(u) : null);
+      },
+      () => setSellerUsername(null),
+    );
+
+    return unsub;
+  }, [order?.sellerId]);
+
+  useEffect(() => {
+    const t = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
 
   async function send() {
     if (sending) return;
@@ -586,6 +696,58 @@ export default function OrderChat() {
     return s ? s : "—";
   }, [order?.orderStatus]);
 
+  const orderGig = useMemo(() => {
+    const gigId = String(order?.gigId || "");
+    if (!gigId) return null;
+    return getStoredGig(gigId);
+  }, [order?.gigId]);
+
+  const orderService = useMemo(() => {
+    const serviceId = String(order?.serviceId || "");
+    const services = Array.isArray((orderGig as any)?.services) ? (orderGig as any).services : [];
+    if (!serviceId) return null;
+    return services.find((s: any) => String(s?.service_id) === serviceId) || null;
+  }, [order?.serviceId, orderGig]);
+
+  const dueMs = useMemo(() => tsToMillis(order?.dueAt), [order?.dueAt]);
+  const dueText = useMemo(() => tsToText(order?.dueAt) || "—", [order?.dueAt]);
+  const remainingMs = useMemo(() => {
+    if (!dueMs) return null;
+    return dueMs - nowMs;
+  }, [dueMs, nowMs]);
+
+  const countdown = useMemo(() => {
+    if (remainingMs === null) return null;
+    const overdue = remainingMs < 0;
+    const parts = formatCountdownParts(Math.abs(remainingMs));
+    return { overdue, ...parts };
+  }, [remainingMs]);
+
+  const orderProgress = useMemo(() => {
+    const status = String(order?.orderStatus || "");
+    if (!status) return 0;
+    if (status === "Pending") return 25;
+    if (status === "In Progress" || status === "Revision") return 55;
+    if (status === "Delivered") return 80;
+    if (status === "Completed") return 100;
+    return 40;
+  }, [order?.orderStatus]);
+
+  const numericOrderNo = useMemo(() => orderNumberDigits(order?.orderId || orderId), [order?.orderId, orderId]);
+  const orderedByLabel = useMemo(() => {
+    const buyerId = String(order?.clientId || "");
+    if (user?.uid && buyerId && user.uid === buyerId) return "You";
+    if (buyerUsername) return `@${buyerUsername}`;
+    return buyerId || "—";
+  }, [buyerUsername, order?.clientId, user?.uid]);
+
+  const sellerLabel = useMemo(() => {
+    const sellerId = String(order?.sellerId || "");
+    if (user?.uid && sellerId && user.uid === sellerId) return "You";
+    if (sellerUsername) return `@${sellerUsername}`;
+    return sellerId || "—";
+  }, [order?.sellerId, sellerUsername, user?.uid]);
+
   const revisionInfo = useMemo(() => {
     const used = Number(order?.revisionCount || 0);
     const limit = Number(order?.revisionLimit || 2);
@@ -658,72 +820,184 @@ export default function OrderChat() {
                   <div className="text-sm text-muted-foreground">Waiting for buyer to submit requirements.</div>
                 ) : null}
 
-                <div className="grid gap-4 lg:grid-cols-3">
-                  <Card className="lg:col-span-2">
-                    <CardHeader>
-                      <CardTitle className="text-base">Messages</CardTitle>
-                      <CardDescription>Only buyer and seller can access this chat.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      <ScrollArea className="h-[420px] rounded-md border">
-                        <div className="p-3 space-y-3">
-                          {messages.length ? (
-                            messages.map((m) => (
-                              <div key={m.id} className="space-y-1">
-                                <div className="text-xs text-muted-foreground">
-                                  {m.senderId === user?.uid ? "You" : "Them"}
-                                  {m.createdAt ? <span className="ml-2">{tsToText(m.createdAt)}</span> : null}
-                                </div>
-                                {m.text ? <div className="text-sm whitespace-pre-wrap">{m.text}</div> : null}
-                                {Array.isArray(m.attachments) && m.attachments.length ? (
-                                  <div className="text-xs">
-                                    {m.attachments.map((a) => (
-                                      <div key={a.path}>
-                                        <button type="button" className="underline" onClick={() => void openUploadedFile(a)}>
-                                          {a.name}
-                                        </button>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : null}
-                                <Separator />
-                              </div>
-                            ))
-                          ) : (
-                            <div className="text-sm text-muted-foreground">No messages yet.</div>
-                          )}
-                          <div ref={bottomRef} />
-                        </div>
-                      </ScrollArea>
+                <Tabs defaultValue="activity" className="w-full">
+                  <TabsList className="w-full justify-start">
+                    <TabsTrigger value="activity">Activity</TabsTrigger>
+                    <TabsTrigger value="details">Details</TabsTrigger>
+                    <TabsTrigger value="requirements">Requirements</TabsTrigger>
+                    <TabsTrigger value="stock">Stock Media</TabsTrigger>
+                  </TabsList>
 
-                      <div className="space-y-2">
-                        <Textarea
-                          value={draft}
-                          onChange={(e) => setDraft(e.target.value)}
-                          placeholder={role === "buyer" && requirementsExists === false ? "Submit requirements to start chat." : "Type a message…"}
-                          disabled={!canAccess || sending || (role === "buyer" && requirementsExists === false)}
-                        />
-                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                          <div className="flex items-center gap-2">
-                            <Input
-                              type="file"
-                              multiple
-                              onChange={(e) => setAttachFiles(Array.from(e.target.files || []))}
+                  <TabsContent value="activity" className="mt-4">
+                    <div className="grid gap-4 lg:grid-cols-3">
+                      <Card className="lg:col-span-2">
+                        <CardHeader>
+                          <CardTitle className="text-base">Messages</CardTitle>
+                          <CardDescription>Only buyer and seller can access this order.</CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                          <ScrollArea className="h-[420px] rounded-md border">
+                            <div className="p-3 space-y-3">
+                              {messages.length ? (
+                                messages.map((m) => (
+                                  <div key={m.id} className="space-y-1">
+                                    <div className="text-xs text-muted-foreground">
+                                      {m.senderId === user?.uid ? "You" : "Them"}
+                                      {m.createdAt ? <span className="ml-2">{tsToText(m.createdAt)}</span> : null}
+                                    </div>
+                                    {m.text ? <div className="text-sm whitespace-pre-wrap">{m.text}</div> : null}
+                                    {Array.isArray(m.attachments) && m.attachments.length ? (
+                                      <div className="text-xs">
+                                        {m.attachments.map((a) => (
+                                          <div key={a.path}>
+                                            <button type="button" className="underline" onClick={() => void openUploadedFile(a)}>
+                                              {a.name}
+                                            </button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : null}
+                                    <Separator />
+                                  </div>
+                                ))
+                              ) : (
+                                <div className="text-sm text-muted-foreground">No messages yet.</div>
+                              )}
+                              <div ref={bottomRef} />
+                            </div>
+                          </ScrollArea>
+
+                          <div className="space-y-2">
+                            <Textarea
+                              value={draft}
+                              onChange={(e) => setDraft(e.target.value)}
+                              placeholder={role === "buyer" && requirementsExists === false ? "Submit requirements to start chat." : "Type a message…"}
                               disabled={!canAccess || sending || (role === "buyer" && requirementsExists === false)}
                             />
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                              <div className="flex items-center gap-2">
+                                <Input
+                                  type="file"
+                                  multiple
+                                  onChange={(e) => setAttachFiles(Array.from(e.target.files || []))}
+                                  disabled={!canAccess || sending || (role === "buyer" && requirementsExists === false)}
+                                />
+                              </div>
+                              <Button onClick={send} disabled={!canAccess || sending || (!draft.trim() && !attachFiles.length) || (role === "buyer" && requirementsExists === false)}>
+                                {sending ? "Sending…" : "Send"}
+                              </Button>
+                            </div>
+                            {attachFiles.length ? (
+                              <div className="text-xs text-muted-foreground">Selected: {attachFiles.length} file(s)</div>
+                            ) : null}
                           </div>
-                          <Button onClick={send} disabled={!canAccess || sending || (!draft.trim() && !attachFiles.length) || (role === "buyer" && requirementsExists === false)}>
-                            {sending ? "Sending…" : "Send"}
-                          </Button>
-                        </div>
-                        {attachFiles.length ? (
-                          <div className="text-xs text-muted-foreground">Selected: {attachFiles.length} file(s)</div>
-                        ) : null}
-                      </div>
-                    </CardContent>
-                  </Card>
+                        </CardContent>
+                      </Card>
 
-                  <div className="space-y-4">
+                      <div className="space-y-4">
+                        <Card>
+                          <CardHeader>
+                            <CardTitle className="text-base">Time left to deliver</CardTitle>
+                            <CardDescription>{dueMs ? (countdown?.overdue ? "Past due" : "On track") : "Delivery time"}</CardDescription>
+                          </CardHeader>
+                          <CardContent className="space-y-3">
+                            {countdown ? (
+                              <div className="grid grid-cols-4 gap-2 text-center">
+                                <div className="rounded-md border p-2">
+                                  <div className="text-lg font-semibold">{String(countdown.days).padStart(2, "0")}</div>
+                                  <div className="text-xs text-muted-foreground">Days</div>
+                                </div>
+                                <div className="rounded-md border p-2">
+                                  <div className="text-lg font-semibold">{String(countdown.hours).padStart(2, "0")}</div>
+                                  <div className="text-xs text-muted-foreground">Hours</div>
+                                </div>
+                                <div className="rounded-md border p-2">
+                                  <div className="text-lg font-semibold">{String(countdown.minutes).padStart(2, "0")}</div>
+                                  <div className="text-xs text-muted-foreground">Minutes</div>
+                                </div>
+                                <div className="rounded-md border p-2">
+                                  <div className="text-lg font-semibold">{String(countdown.seconds).padStart(2, "0")}</div>
+                                  <div className="text-xs text-muted-foreground">Seconds</div>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="text-sm text-muted-foreground">No delivery due date set for this order.</div>
+                            )}
+
+                            <div className="text-xs text-muted-foreground">Delivery date: {dueText}</div>
+
+                            {role === "seller" ? (
+                              <Button
+                                onClick={() => {
+                                  const el = document.getElementById("delivery-panel");
+                                  el?.scrollIntoView({ behavior: "smooth", block: "start" });
+                                }}
+                                className="w-full"
+                              >
+                                Deliver Now
+                              </Button>
+                            ) : null}
+                          </CardContent>
+                        </Card>
+
+                        <Card>
+                          <CardHeader>
+                            <CardTitle className="text-base">Order Details</CardTitle>
+                            <CardDescription>Summary</CardDescription>
+                          </CardHeader>
+                          <CardContent className="space-y-2 text-sm">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-muted-foreground">Service</div>
+                              <div className="text-right font-medium">{String((orderService as any)?.name || order?.serviceId || "—")}</div>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-muted-foreground">Gig</div>
+                              <div className="text-right font-medium">{String((orderGig as any)?.title || order?.gigId || "—")}</div>
+                            </div>
+                            <Separator />
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-muted-foreground">Ordered by</div>
+                              <div className="text-right font-medium">{orderedByLabel}</div>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-muted-foreground">Seller</div>
+                              <div className="text-right font-medium">{sellerLabel}</div>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-muted-foreground">Delivery date</div>
+                              <div className="text-right">{dueText}</div>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-muted-foreground">Total price</div>
+                              <div className="text-right font-medium">₹{Number(order?.amountRupees || 0).toLocaleString()}</div>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-muted-foreground">Order number</div>
+                              <div className="text-right font-mono text-xs">{numericOrderNo ? `#${numericOrderNo}` : "—"}</div>
+                            </div>
+                          </CardContent>
+                        </Card>
+
+                        <Card>
+                          <CardHeader>
+                            <CardTitle className="text-base">Track Order</CardTitle>
+                            <CardDescription>Status & progress</CardDescription>
+                          </CardHeader>
+                          <CardContent className="space-y-3">
+                            <Progress value={clamp(orderProgress, 0, 100)} />
+                            <div className="space-y-1 text-sm">
+                              <div className="flex items-center justify-between">
+                                <span className="text-muted-foreground">Requirements submitted</span>
+                                <Badge variant={requirementsExists ? "default" : "outline"}>{requirementsExists ? "Yes" : "No"}</Badge>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-muted-foreground">Order status</span>
+                                <Badge variant="outline">{headerStatus}</Badge>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+
                     {delivery ? (
                       <Card>
                         <CardHeader>
@@ -756,6 +1030,7 @@ export default function OrderChat() {
 
                     {role === "seller" ? (
                       <Card>
+                        <div id="delivery-panel" />
                         <CardHeader>
                           <CardTitle className="text-base">Delivery</CardTitle>
                           <CardDescription>Upload final files and deliver.</CardDescription>
@@ -836,6 +1111,120 @@ export default function OrderChat() {
                     </Card>
                   </div>
                 </div>
+                  </TabsContent>
+
+                  <TabsContent value="details" className="mt-4">
+                    <div className="grid gap-4 lg:grid-cols-3">
+                      <Card className="lg:col-span-2">
+                        <CardHeader>
+                          <CardTitle className="text-base">Order Details</CardTitle>
+                          <CardDescription>Metadata and timeline</CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-2 text-sm">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-muted-foreground">Order number</div>
+                            <div className="font-mono text-xs">{numericOrderNo ? `#${numericOrderNo}` : "—"}</div>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-muted-foreground">Order ID</div>
+                            <div className="font-mono text-xs">{String(order?.orderId || orderId)}</div>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-muted-foreground">Payment status</div>
+                            <Badge variant="outline">{String(order?.paymentStatus || "—")}</Badge>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-muted-foreground">Order status</div>
+                            <Badge variant="outline">{headerStatus}</Badge>
+                          </div>
+                          <Separator />
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-muted-foreground">Created</div>
+                            <div>{tsToText(order?.createdAt) || "—"}</div>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-muted-foreground">Due</div>
+                            <div>{dueText}</div>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-muted-foreground">Delivery time</div>
+                            <div>{Number(order?.deliveryTimeDays || 0) ? `${Number(order?.deliveryTimeDays)} day(s)` : "—"}</div>
+                          </div>
+                          <Separator />
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-muted-foreground">Buyer</div>
+                            <div className="font-medium">{orderedByLabel}</div>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-muted-foreground">Seller</div>
+                            <div className="font-medium">{sellerLabel}</div>
+                          </div>
+                        </CardContent>
+                      </Card>
+
+                      <div className="space-y-4">
+                        <Card>
+                          <CardHeader>
+                            <CardTitle className="text-base">Track Order</CardTitle>
+                            <CardDescription>Status & progress</CardDescription>
+                          </CardHeader>
+                          <CardContent className="space-y-3">
+                            <Progress value={clamp(orderProgress, 0, 100)} />
+                            <div className="space-y-1 text-sm">
+                              <div className="flex items-center justify-between">
+                                <span className="text-muted-foreground">Requirements submitted</span>
+                                <Badge variant={requirementsExists ? "default" : "outline"}>{requirementsExists ? "Yes" : "No"}</Badge>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-muted-foreground">Order status</span>
+                                <Badge variant="outline">{headerStatus}</Badge>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+
+                        <Card>
+                          <CardHeader>
+                            <CardTitle className="text-base">Order</CardTitle>
+                            <CardDescription>Quick links</CardDescription>
+                          </CardHeader>
+                          <CardContent className="space-y-2">
+                            <Button variant="outline" onClick={() => navigate("/my-orders")}>Back to orders</Button>
+                          </CardContent>
+                        </Card>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="requirements" className="mt-4">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="text-base">Requirements</CardTitle>
+                        <CardDescription>Buyer requirements for this order.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-3">
+                        <div className="text-sm">
+                          Status: <Badge variant={requirementsExists ? "default" : "outline"}>{requirementsExists ? "Submitted" : "Not submitted"}</Badge>
+                        </div>
+                        <Button onClick={() => navigate(`/orders/${encodeURIComponent(orderId)}/requirements`)}>
+                          {requirementsExists ? "View requirements" : "Submit requirements"}
+                        </Button>
+                      </CardContent>
+                    </Card>
+                  </TabsContent>
+
+                  <TabsContent value="stock" className="mt-4">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="text-base">Stock Media</CardTitle>
+                        <CardDescription>Files linked to this order.</CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="text-sm text-muted-foreground">No stock media has been added for this order.</div>
+                      </CardContent>
+                    </Card>
+                  </TabsContent>
+                </Tabs>
               </CardContent>
             </Card>
           </div>

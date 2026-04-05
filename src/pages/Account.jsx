@@ -346,6 +346,15 @@ export default function Account() {
     if (!user?.uid) return;
     if (!photoFile) return;
 
+    if (!supabase) {
+      toast({
+        title: "Supabase not configured",
+        description: "Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env.local, then restart the dev server.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     // Basic client-side validation
     if (!photoFile.type?.startsWith("image/")) {
       toast({
