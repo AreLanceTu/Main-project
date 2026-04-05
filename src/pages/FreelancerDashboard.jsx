@@ -69,6 +69,7 @@ import { getMySubscriptionStatus } from "@/lib/subscriptions";
 import { upsertFirestoreServices } from "@/lib/services";
 import { upsertFirestoreGig } from "@/lib/firestoreGigs";
 import { supabaseUploadViaFunction } from "@/lib/supabaseStorage";
+import { DEMO_GIG_IDS } from "@/lib/demoGigs";
 
 function formatCurrency(amount) {
   const value = typeof amount === "number" && Number.isFinite(amount) ? amount : 0;
@@ -102,6 +103,19 @@ function statusBadgeVariant(status) {
   if (status === "Paused") return "secondary";
   if (status === "Draft") return "outline";
   return "outline";
+}
+
+function normalizeOrderStatus(raw) {
+  const s = String(raw ?? "").trim();
+  const lower = s.toLowerCase();
+  if (!lower) return "Pending";
+  if (lower === "pending") return "Pending";
+  if (lower === "in progress" || lower === "inprogress") return "In Progress";
+  if (lower === "revision" || lower === "revisions") return "Revision";
+  if (lower === "delivered" || lower === "delivered to buyer") return "Delivered";
+  if (lower === "completed" || lower === "complete") return "Completed";
+  if (lower === "cancelled" || lower === "canceled" || lower === "cancel") return "Cancelled";
+  return s;
 }
 
 function normalizeWithdrawalStatus(status) {
@@ -211,7 +225,7 @@ export default function FreelancerDashboard() {
       (snap) => {
         const items = snap.docs.map((d) => {
           const data = d.data() || {};
-          const orderStatus = String(data.orderStatus || "Pending");
+          const orderStatus = normalizeOrderStatus(data.orderStatus);
           const status = ["In Progress", "Revision", "Pending"].includes(orderStatus)
             ? "Active"
             : orderStatus === "Delivered"
@@ -238,6 +252,8 @@ export default function FreelancerDashboard() {
           return {
             id: String(data.orderId || d.id),
             clientId: String(data.clientId || ""),
+            gigId: String(data.gigId || ""),
+            serviceId: String(data.serviceId || ""),
             amountRupees: Number(data.amountRupees || 0),
             deadlineISO,
             status,
@@ -259,6 +275,25 @@ export default function FreelancerDashboard() {
 
     return unsub;
   }, [userUid]);
+
+  const gigOrdersById = useMemo(() => {
+    const map = new Map();
+    for (const o of orders) {
+      const gigId = String(o.gigId || "").trim();
+      if (!gigId) continue;
+      map.set(gigId, (map.get(gigId) || 0) + 1);
+    }
+    return map;
+  }, [orders]);
+
+  const gigsWithStats = useMemo(
+    () =>
+      gigs.map((g) => ({
+        ...g,
+        orders: gigOrdersById.get(g.id) || 0,
+      })),
+    [gigs, gigOrdersById],
+  );
 
   const [withdrawals, setWithdrawals] = useState(() => []);
   const [withdrawalsLoading, setWithdrawalsLoading] = useState(false);
@@ -398,7 +433,8 @@ export default function FreelancerDashboard() {
     const unsub = onSnapshot(
       q,
       (snap) => {
-        const items = snap.docs.map((d) => {
+        const items = snap.docs
+          .map((d) => {
           const data = d.data() || {};
           const gigId = String(data.gig_id || d.id);
           return {
@@ -411,7 +447,9 @@ export default function FreelancerDashboard() {
             orders: 0,
             sellerId: String(data.seller_id || ""),
           };
-        });
+          })
+          // Never show demo gigs inside a real freelancer account/dashboard.
+          .filter((g) => !DEMO_GIG_IDS.includes(String(g.id)));
 
         setGigs(items);
         setSelectedGigId((prev) => {
@@ -623,9 +661,9 @@ export default function FreelancerDashboard() {
 
   const overview = useMemo(() => {
     const activeOrdersCount = orders.filter((o) => o.status === "Active").length;
-    const gigImpressions = gigs.reduce((sum, g) => sum + (g.impressions || 0), 0);
+    const gigImpressions = gigsWithStats.reduce((sum, g) => sum + (g.impressions || 0), 0);
 
-    const totalOrders = gigs.reduce((sum, g) => sum + (g.orders || 0), 0);
+    const totalOrders = gigsWithStats.reduce((sum, g) => sum + (g.orders || 0), 0);
     const totalEarnings = totalOrders * 60;
 
     const todayEarnings = Math.round(totalEarnings * 0.07);
@@ -638,9 +676,12 @@ export default function FreelancerDashboard() {
       activeOrdersCount,
       gigImpressions,
     };
-  }, [gigs, orders]);
+  }, [gigsWithStats, orders]);
 
-  const selectedGig = useMemo(() => gigs.find((g) => g.id === selectedGigId) ?? gigs[0], [gigs, selectedGigId]);
+  const selectedGig = useMemo(
+    () => gigsWithStats.find((g) => g.id === selectedGigId) ?? gigsWithStats[0],
+    [gigsWithStats, selectedGigId],
+  );
 
   const analyticsSeries = useMemo(() => {
     if (!selectedGig) return [];
@@ -648,7 +689,7 @@ export default function FreelancerDashboard() {
   }, [selectedGig, analyticsDays]);
 
   const earnings = useMemo(() => {
-    const totalGigOrders = gigs.reduce((sum, g) => sum + (g.orders || 0), 0);
+    const totalGigOrders = gigsWithStats.reduce((sum, g) => sum + (g.orders || 0), 0);
     const grossFromGigs = totalGigOrders * 60;
     const grossFromOrders = orders.reduce((sum, o) => sum + (Number(o.amountRupees) || 0), 0);
     const gross = Math.max(grossFromGigs, grossFromOrders);
@@ -668,7 +709,7 @@ export default function FreelancerDashboard() {
       pendingClearance,
       gross,
     };
-  }, [gigs, orders, withdrawals]);
+  }, [gigsWithStats, orders, withdrawals]);
 
   const ordersDerived = useMemo(() => {
     const now = Date.now();
@@ -1309,7 +1350,7 @@ export default function FreelancerDashboard() {
               <AccordionContent className="px-5 pb-6 pt-4 text-base">
                 <div className="space-y-6">
                   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                    {gigs.map((gig) => (
+                    {gigsWithStats.map((gig) => (
                       <Card
                         key={`card-${gig.id}`}
                         className="cursor-pointer hover:bg-muted/40 transition-colors"
@@ -1348,7 +1389,7 @@ export default function FreelancerDashboard() {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {gigs.map((gig) => {
+                          {gigsWithStats.map((gig) => {
                             const conv = conversionRate({ clicks: gig.clicks, orders: gig.orders });
                             return (
                               <TableRow key={gig.id}>

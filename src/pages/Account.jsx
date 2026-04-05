@@ -1,5 +1,5 @@
 import { Helmet } from "react-helmet-async";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged, sendEmailVerification, updateProfile } from "firebase/auth";
 import {
   collection,
@@ -41,6 +41,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
+import { listenSellerRatingStats } from "@/lib/publicReviews";
 
 export default function Account() {
   const { toast } = useToast();
@@ -69,6 +70,10 @@ export default function Account() {
   const [paymentOrders, setPaymentOrders] = useState([]);
   const [paymentOrdersLoading, setPaymentOrdersLoading] = useState(false);
   const [paymentOrdersError, setPaymentOrdersError] = useState(null);
+
+  const [sellerAvgRating, setSellerAvgRating] = useState(null);
+  const [sellerRatingCount, setSellerRatingCount] = useState(0);
+  const lastPersistedRatingRef = useRef({ avgRating: null, ratingCount: 0 });
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -299,6 +304,46 @@ export default function Account() {
   }
 
   const effectiveRole = role ?? "client";
+
+  useEffect(() => {
+    if (!user?.uid) {
+      setSellerAvgRating(null);
+      setSellerRatingCount(0);
+      return undefined;
+    }
+
+    if (effectiveRole !== "freelancer") {
+      setSellerAvgRating(null);
+      setSellerRatingCount(0);
+      return undefined;
+    }
+
+    const unsub = listenSellerRatingStats(db, user.uid, (stats) => {
+      setSellerAvgRating(stats.avgRating);
+      setSellerRatingCount(stats.ratingCount);
+
+      const prev = lastPersistedRatingRef.current;
+      if (prev.avgRating === stats.avgRating && prev.ratingCount === stats.ratingCount) return;
+
+      lastPersistedRatingRef.current = {
+        avgRating: stats.avgRating,
+        ratingCount: stats.ratingCount,
+      };
+
+      // Best-effort: persist to /users/{uid} so rating shows across the app.
+      setDoc(
+        doc(db, "users", user.uid),
+        {
+          avgRating: stats.avgRating,
+          ratingCount: stats.ratingCount,
+          ratingUpdatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      ).catch(() => {});
+    });
+
+    return unsub;
+  }, [effectiveRole, user?.uid]);
 
   const providers = useMemo(() => {
     const list = user?.providerData ?? [];
@@ -566,6 +611,26 @@ export default function Account() {
                     <Input value={effectiveRole} readOnly />
                   </div>
                 </div>
+
+                {effectiveRole === "freelancer" ? (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label>Average rating</Label>
+                      <Input
+                        value={
+                          typeof sellerAvgRating === "number"
+                            ? `${sellerAvgRating.toFixed(2)} / 5`
+                            : "—"
+                        }
+                        readOnly
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Total reviews</Label>
+                      <Input value={String(sellerRatingCount || 0)} readOnly />
+                    </div>
+                  </div>
+                ) : null}
 
                 <div className="flex items-center gap-2 flex-wrap">
                   <Button onClick={saveDisplayName} disabled={!user || savingProfile}>

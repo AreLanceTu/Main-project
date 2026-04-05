@@ -19,6 +19,7 @@ import Navbar from "@/components/layout/Navbar";
 import Footer from "@/components/layout/Footer";
 import { auth, db } from "@/firebase";
 import { getUserRole, setUserRole as setLocalUserRole } from "@/auth/role";
+import { isFreelancerDocRegistered } from "@/lib/freelancerAccess";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -237,7 +238,7 @@ export default function ClientDashboard() {
     const unsub = onSnapshot(
       doc(db, "freelancers", userUid),
       (snap) => {
-        const ok = snap.exists();
+        const ok = snap.exists() && isFreelancerDocRegistered(snap.data(), userUid);
         setFreelancerRegistered(ok);
         if (!ok && userRole === "freelancer") {
           setLocalUserRole(userUid, "client");
@@ -874,7 +875,7 @@ export default function ClientDashboard() {
                                   Open
                                 </Button>
                               )}
-                              {String(p.status) === "Delivered" ? (
+                              {String(p.status || "").trim().toLowerCase() === "delivered" ? (
                                 <Button size="sm" onClick={() => navigate(`/orders/${p.id}/chat`)}>
                                   Complete
                                 </Button>

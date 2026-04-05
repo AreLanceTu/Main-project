@@ -80,17 +80,20 @@ function normalizeProfile(input: FreelancerProfileInput): FreelancerProfileInput
     }
   }
 
-  return {
+  const out: FreelancerProfileInput = {
     fullName,
     phone,
     title,
     bio,
     city,
     state,
-    primaryCategory: primaryCategory || undefined,
-    skills: skills?.length ? skills : undefined,
-    portfolioUrl: portfolioUrl || undefined,
   };
+
+  if (primaryCategory) out.primaryCategory = primaryCategory;
+  if (skills?.length) out.skills = skills;
+  if (portfolioUrl) out.portfolioUrl = portfolioUrl;
+
+  return out;
 }
 
 export async function isFreelancerRegistered(db: Firestore, uid: string): Promise<boolean> {

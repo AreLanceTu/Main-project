@@ -10,6 +10,7 @@ import { onAuthStateChanged, reload, sendEmailVerification, signOut } from "fire
 import { doc, getDoc } from "firebase/firestore";
 import { getUserRole, roleDefaultDashboardPath } from "@/auth/role";
 import { setUserRole } from "@/auth/role";
+import { isFreelancerDocRegistered } from "@/lib/freelancerAccess";
 
 export default function VerifyEmail() {
   const { toast } = useToast();
@@ -27,7 +28,8 @@ export default function VerifyEmail() {
         (async () => {
           try {
             const snap = await getDoc(doc(db, "freelancers", nextUser.uid));
-            setUserRole(nextUser.uid, snap.exists() ? "freelancer" : "client");
+            const ok = snap.exists() && isFreelancerDocRegistered(snap.data(), nextUser.uid);
+            setUserRole(nextUser.uid, ok ? "freelancer" : "client");
           } catch {
             // ignore
           }
@@ -86,7 +88,8 @@ export default function VerifyEmail() {
         });
         try {
           const snap = await getDoc(doc(db, "freelancers", auth.currentUser.uid));
-          setUserRole(auth.currentUser.uid, snap.exists() ? "freelancer" : "client");
+          const ok = snap.exists() && isFreelancerDocRegistered(snap.data(), auth.currentUser.uid);
+          setUserRole(auth.currentUser.uid, ok ? "freelancer" : "client");
         } catch {
           // ignore
         }

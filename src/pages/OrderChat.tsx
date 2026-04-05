@@ -1,6 +1,6 @@
 import { Helmet } from "react-helmet-async";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { onAuthStateChanged, type User } from "firebase/auth";
 import {
   addDoc,
@@ -27,12 +27,15 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Star } from "lucide-react";
 
 import { auth, db } from "@/firebase";
 import { uploadOrderFiles, type UploadedFile } from "@/lib/orderUploads";
 import { supabaseSignedDownloadUrl } from "@/lib/supabaseStorage";
 import { useToast } from "@/hooks/use-toast";
 import { getStoredGig } from "@/lib/gigStore";
+import { getOrderReview, type OrderReviewDoc } from "@/lib/orderReviews";
 
 type OrderDoc = {
   orderId: string;
@@ -51,6 +54,7 @@ type OrderDoc = {
   createdAt?: any;
   deliveredAt?: any;
   autoCompleteAt?: any;
+  cancelledAt?: any;
 };
 
 type ChatMessage = {
@@ -118,6 +122,19 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+function normalizeOrderStatus(raw: any): string {
+  const s = String(raw ?? "").trim();
+  const lower = s.toLowerCase();
+  if (!lower) return "";
+  if (lower === "pending") return "Pending";
+  if (lower === "in progress" || lower === "inprogress") return "In Progress";
+  if (lower === "revision" || lower === "revisions") return "Revision";
+  if (lower === "delivered" || lower === "delivered to buyer") return "Delivered";
+  if (lower === "completed" || lower === "complete") return "Completed";
+  if (lower === "cancelled" || lower === "canceled" || lower === "cancel") return "Cancelled";
+  return s;
+}
+
 function hash32FNV1a(input: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < input.length; i += 1) {
@@ -136,6 +153,7 @@ function orderNumberDigits(orderId: string): string {
 
 export default function OrderChat() {
   const { toast } = useToast();
+  const location = useLocation();
   const navigate = useNavigate();
   const { orderId: orderIdParam } = useParams();
   const orderId = String(orderIdParam || "");
@@ -158,6 +176,13 @@ export default function OrderChat() {
 
   const [accepting, setAccepting] = useState(false);
   const [requestingRevision, setRequestingRevision] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [review, setReview] = useState<OrderReviewDoc | null>(null);
+  const [reviewRating, setReviewRating] = useState<string>("");
+  const [reviewComment, setReviewComment] = useState("");
+  const [submittingReview, setSubmittingReview] = useState(false);
 
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -165,6 +190,7 @@ export default function OrderChat() {
   const [sellerUsername, setSellerUsername] = useState<string | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const reviewAnchorRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => setUser(u));
@@ -260,7 +286,7 @@ export default function OrderChat() {
     if (autoCompletedRef.current) return;
     if (role !== "buyer") return;
     if (!order) return;
-    if (String(order.orderStatus || "") !== "Delivered") return;
+    if (normalizeOrderStatus(order.orderStatus) !== "Delivered") return;
     const raw = String(order.autoCompleteAt || "");
     if (!raw) return;
 
@@ -279,6 +305,8 @@ export default function OrderChat() {
     if (!order) return false;
     return role === "buyer" || role === "seller";
   }, [order, role, user?.uid]);
+
+  const orderStatus = normalizeOrderStatus(order?.orderStatus);
 
   useEffect(() => {
     if (!canAccess) return;
@@ -352,9 +380,11 @@ export default function OrderChat() {
   }, [order?.sellerId]);
 
   useEffect(() => {
+    // Stop ticking once the order is completed (no more countdown UI).
+    if (orderStatus === "Completed" || orderStatus === "Cancelled") return undefined;
     const t = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(t);
-  }, []);
+  }, [orderStatus]);
 
   async function send() {
     if (sending) return;
@@ -410,7 +440,7 @@ export default function OrderChat() {
     if (role !== "seller") return;
     if (!user?.uid || !order) return;
 
-    const status = String(order.orderStatus || "");
+    const status = normalizeOrderStatus(order.orderStatus);
     if (!["In Progress", "Revision"].includes(status)) {
       toast({
         title: "Blocked",
@@ -502,7 +532,7 @@ export default function OrderChat() {
     if (accepting) return;
     if (role !== "buyer") return;
     if (!user?.uid || !order) return;
-    const currentStatus = String(order.orderStatus || "");
+    const currentStatus = normalizeOrderStatus(order.orderStatus);
     if (currentStatus === "Completed") {
       toast({ title: "Already completed", description: "This order is already completed." });
       return;
@@ -535,8 +565,11 @@ export default function OrderChat() {
         { merge: true },
       );
 
+      // Flip UI immediately; snapshot will confirm.
+      setOrder((prev) => (prev ? { ...prev, orderStatus: "Completed" } : prev));
+
       const freshOrder = await getDoc(orderRef);
-      const freshStatus = String((freshOrder.data() as any)?.orderStatus || "");
+      const freshStatus = normalizeOrderStatus((freshOrder.data() as any)?.orderStatus);
       if (freshStatus !== "Completed") {
         throw new Error("Order status update did not complete. Please retry.");
       }
@@ -611,6 +644,9 @@ export default function OrderChat() {
 
       await batch.commit();
       toast({ title: "Completed", description: "Order marked as completed." });
+
+      // Bring the user to the review UI right after completing.
+      navigate(`/orders/${encodeURIComponent(orderId)}/chat#review`, { replace: true });
     } catch (e: any) {
       toast({
         title: "Could not complete",
@@ -626,7 +662,7 @@ export default function OrderChat() {
     if (requestingRevision) return;
     if (role !== "buyer") return;
     if (!user?.uid || !order) return;
-    if (String(order.orderStatus || "") !== "Delivered") {
+    if (normalizeOrderStatus(order.orderStatus) !== "Delivered") {
       toast({
         title: "Blocked",
         description: "You can request revision only after delivery.",
@@ -691,10 +727,217 @@ export default function OrderChat() {
     }
   }
 
+  async function cancelOrder() {
+    if (cancelling) return;
+    if (role !== "buyer") return;
+    if (!user?.uid || !order) return;
+
+    const currentStatus = normalizeOrderStatus(order.orderStatus);
+    if (currentStatus === "Completed") {
+      toast({ title: "Blocked", description: "Completed orders cannot be cancelled.", variant: "destructive" });
+      return;
+    }
+    if (currentStatus === "Cancelled") {
+      toast({ title: "Already cancelled", description: "This order is already cancelled." });
+      return;
+    }
+    if (currentStatus === "Delivered") {
+      toast({
+        title: "Blocked",
+        description: "Delivered orders cannot be cancelled. You can request a revision or mark it complete.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!['Pending', 'In Progress', 'Revision'].includes(currentStatus)) {
+      toast({ title: "Blocked", description: `You cannot cancel an order in status: ${currentStatus || '—'}.`, variant: "destructive" });
+      return;
+    }
+
+    const ok = window.confirm("Cancel this order? This cannot be undone.");
+    if (!ok) return;
+
+    try {
+      setCancelling(true);
+
+      const orderRef = doc(db, "orders", orderId);
+      const notifRef = doc(db, "notifications", `${orderId}_cancelled`);
+
+      const batch = writeBatch(db);
+      batch.set(
+        orderRef,
+        { orderStatus: "Cancelled", cancelledAt: serverTimestamp(), updatedAt: serverTimestamp() },
+        { merge: true },
+      );
+
+      const sellerId = String(order.sellerId || "").trim();
+      if (sellerId) {
+        batch.set(
+          notifRef,
+          {
+            id: notifRef.id,
+            toUserId: sellerId,
+            fromUserId: user.uid,
+            type: "order_cancelled",
+            orderId,
+            title: "Order cancelled",
+            message: `Buyer cancelled order ${orderId}.`,
+            createdAt: serverTimestamp(),
+            read: false,
+          },
+          { merge: true },
+        );
+      }
+
+      await batch.commit();
+
+      // Optimistic UI
+      setOrder((prev) => (prev ? { ...prev, orderStatus: "Cancelled" } : prev));
+      toast({ title: "Cancelled", description: "Order cancelled." });
+      navigate(`/orders/${encodeURIComponent(orderId)}/chat`, { replace: true });
+    } catch (e: any) {
+      toast({
+        title: "Could not cancel",
+        description: e?.message || "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setCancelling(false);
+    }
+  }
+
   const headerStatus = useMemo(() => {
-    const s = String(order?.orderStatus || "");
+    const s = normalizeOrderStatus(order?.orderStatus);
     return s ? s : "—";
   }, [order?.orderStatus]);
+
+  useEffect(() => {
+    const hash = String(location.hash || "");
+    if (hash !== "#review") return;
+    // Wait a tick so the section exists in the DOM.
+    window.setTimeout(() => reviewAnchorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+  }, [location.hash, orderStatus]);
+
+  useEffect(() => {
+    const canLoad = role === "buyer" && orderStatus === "Completed" && Boolean(orderId) && Boolean(user?.uid);
+    if (!canLoad) {
+      setReview(null);
+      return;
+    }
+
+    let cancelled = false;
+    async function loadReview() {
+      setReviewLoading(true);
+      try {
+        const r = await getOrderReview(orderId);
+        if (cancelled) return;
+        setReview(r);
+      } catch {
+        if (cancelled) return;
+        setReview(null);
+      } finally {
+        if (!cancelled) setReviewLoading(false);
+      }
+    }
+
+    void loadReview();
+    return () => {
+      cancelled = true;
+    };
+  }, [orderId, orderStatus, role, user?.uid]);
+
+  async function submitReview() {
+    if (submittingReview) return;
+    if (role !== "buyer") return;
+    if (!user?.uid || !orderId) return;
+    if (orderStatus !== "Completed") {
+      toast({
+        title: "Blocked",
+        description: "You can leave a review only after the order is completed.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (review) {
+      toast({ title: "Already reviewed", description: "You already left a review for this order." });
+      return;
+    }
+
+    const rating = Number(reviewRating);
+    const comment = String(reviewComment || "").trim();
+
+    try {
+      setSubmittingReview(true);
+
+      const sellerId = String(order?.sellerId || "").trim();
+      const gigId = String(order?.gigId || "").trim();
+      const serviceId = String(order?.serviceId || "").trim();
+
+      if (!sellerId || !serviceId) {
+        throw new Error("Missing order metadata (sellerId/serviceId)");
+      }
+
+      const privatePayload = {
+        orderId,
+        gigId,
+        serviceId,
+        sellerId,
+        buyerId: user.uid,
+        rating,
+        comment,
+        createdAt: serverTimestamp(),
+      };
+
+      const publicPayload = {
+        orderId,
+        sellerId,
+        rating,
+        comment,
+        createdAt: serverTimestamp(),
+      };
+
+      try {
+        // Preferred: write both private + public-safe docs.
+        const batch = writeBatch(db);
+        batch.set(doc(db, "order_reviews", orderId), privatePayload, { merge: false });
+        batch.set(doc(db, "public_order_reviews", orderId), publicPayload, { merge: false });
+        await batch.commit();
+      } catch (err: any) {
+        const code = String(err?.code || "");
+        const msg = String(err?.message || "");
+        const denied = code === "permission-denied" || /missing or insufficient permissions/i.test(msg);
+        if (!denied) throw err;
+
+        // Fallback: still allow private review saving if public rules aren't deployed yet.
+        const batch = writeBatch(db);
+        batch.set(doc(db, "order_reviews", orderId), privatePayload, { merge: false });
+        await batch.commit();
+
+        toast({
+          title: "Review saved",
+          description:
+            "Your review was saved, but profile ratings require the latest Firestore rules. Deploy firestore.rules to enable public ratings.",
+        });
+      }
+
+      const r = await getOrderReview(orderId);
+      setReview(r);
+      toast({ title: "Thanks!", description: "Your review has been submitted." });
+    } catch (e: any) {
+      const code = String(e?.code || "");
+      const msg = String(e?.message || "");
+      const denied = code === "permission-denied" || /missing or insufficient permissions/i.test(msg);
+      toast({
+        title: "Could not submit review",
+        description: denied
+          ? "Permission denied. Make sure the order is Completed and deploy the latest Firestore rules (firestore.rules)."
+          : e?.message || "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setSubmittingReview(false);
+    }
+  }
 
   const orderGig = useMemo(() => {
     const gigId = String(order?.gigId || "");
@@ -724,8 +967,9 @@ export default function OrderChat() {
   }, [remainingMs]);
 
   const orderProgress = useMemo(() => {
-    const status = String(order?.orderStatus || "");
+    const status = normalizeOrderStatus(order?.orderStatus);
     if (!status) return 0;
+    if (status === "Cancelled") return 0;
     if (status === "Pending") return 25;
     if (status === "In Progress" || status === "Revision") return 55;
     if (status === "Delivered") return 80;
@@ -821,7 +1065,7 @@ export default function OrderChat() {
                 ) : null}
 
                 <Tabs defaultValue="activity" className="w-full">
-                  <TabsList className="w-full justify-start">
+                  <TabsList className="w-full justify-start overflow-x-auto">
                     <TabsTrigger value="activity">Activity</TabsTrigger>
                     <TabsTrigger value="details">Details</TabsTrigger>
                     <TabsTrigger value="requirements">Requirements</TabsTrigger>
@@ -897,46 +1141,64 @@ export default function OrderChat() {
                       <div className="space-y-4">
                         <Card>
                           <CardHeader>
-                            <CardTitle className="text-base">Time left to deliver</CardTitle>
-                            <CardDescription>{dueMs ? (countdown?.overdue ? "Past due" : "On track") : "Delivery time"}</CardDescription>
+                            <CardTitle className="text-base">
+                              {orderStatus === "Completed" ? "Order completed" : "Time left to deliver"}
+                            </CardTitle>
+                            <CardDescription>
+                              {orderStatus === "Completed"
+                                ? (order?.completedAt ? `Completed at: ${tsToText(order.completedAt)}` : "Completed")
+                                : dueMs
+                                  ? countdown?.overdue
+                                    ? "Past due"
+                                    : "On track"
+                                  : "Delivery time"}
+                            </CardDescription>
                           </CardHeader>
                           <CardContent className="space-y-3">
-                            {countdown ? (
-                              <div className="grid grid-cols-4 gap-2 text-center">
-                                <div className="rounded-md border p-2">
-                                  <div className="text-lg font-semibold">{String(countdown.days).padStart(2, "0")}</div>
-                                  <div className="text-xs text-muted-foreground">Days</div>
-                                </div>
-                                <div className="rounded-md border p-2">
-                                  <div className="text-lg font-semibold">{String(countdown.hours).padStart(2, "0")}</div>
-                                  <div className="text-xs text-muted-foreground">Hours</div>
-                                </div>
-                                <div className="rounded-md border p-2">
-                                  <div className="text-lg font-semibold">{String(countdown.minutes).padStart(2, "0")}</div>
-                                  <div className="text-xs text-muted-foreground">Minutes</div>
-                                </div>
-                                <div className="rounded-md border p-2">
-                                  <div className="text-lg font-semibold">{String(countdown.seconds).padStart(2, "0")}</div>
-                                  <div className="text-xs text-muted-foreground">Seconds</div>
-                                </div>
+                            {orderStatus === "Completed" ? (
+                              <div className="text-sm text-muted-foreground">
+                                This order is finished. The delivery countdown is stopped.
                               </div>
                             ) : (
-                              <div className="text-sm text-muted-foreground">No delivery due date set for this order.</div>
+                              <>
+                                {countdown ? (
+                                  <div className="grid grid-cols-4 gap-2 text-center">
+                                    <div className="rounded-md border p-2">
+                                      <div className="text-lg font-semibold">{String(countdown.days).padStart(2, "0")}</div>
+                                      <div className="text-xs text-muted-foreground">Days</div>
+                                    </div>
+                                    <div className="rounded-md border p-2">
+                                      <div className="text-lg font-semibold">{String(countdown.hours).padStart(2, "0")}</div>
+                                      <div className="text-xs text-muted-foreground">Hours</div>
+                                    </div>
+                                    <div className="rounded-md border p-2">
+                                      <div className="text-lg font-semibold">{String(countdown.minutes).padStart(2, "0")}</div>
+                                      <div className="text-xs text-muted-foreground">Minutes</div>
+                                    </div>
+                                    <div className="rounded-md border p-2">
+                                      <div className="text-lg font-semibold">{String(countdown.seconds).padStart(2, "0")}</div>
+                                      <div className="text-xs text-muted-foreground">Seconds</div>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="text-sm text-muted-foreground">No delivery due date set for this order.</div>
+                                )}
+
+                                <div className="text-xs text-muted-foreground">Delivery date: {dueText}</div>
+
+                                {role === "seller" ? (
+                                  <Button
+                                    onClick={() => {
+                                      const el = document.getElementById("delivery-panel");
+                                      el?.scrollIntoView({ behavior: "smooth", block: "start" });
+                                    }}
+                                    className="w-full"
+                                  >
+                                    Deliver Now
+                                  </Button>
+                                ) : null}
+                              </>
                             )}
-
-                            <div className="text-xs text-muted-foreground">Delivery date: {dueText}</div>
-
-                            {role === "seller" ? (
-                              <Button
-                                onClick={() => {
-                                  const el = document.getElementById("delivery-panel");
-                                  el?.scrollIntoView({ behavior: "smooth", block: "start" });
-                                }}
-                                className="w-full"
-                              >
-                                Deliver Now
-                              </Button>
-                            ) : null}
                           </CardContent>
                         </Card>
 
@@ -1066,11 +1328,33 @@ export default function OrderChat() {
                       </Card>
                     ) : null}
 
-                    {role === "buyer" ? (
+                    {role === "buyer" && ["Pending", "In Progress", "Revision"].includes(orderStatus) ? (
                       <Card>
                         <CardHeader>
-                          <CardTitle className="text-base">Review</CardTitle>
-                          <CardDescription>Accept or request revision after delivery.</CardDescription>
+                          <CardTitle className="text-base">Order Actions</CardTitle>
+                          <CardDescription>Cancel the order before delivery.</CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                          <Button
+                            onClick={cancelOrder}
+                            variant="destructive"
+                            disabled={cancelling || !canAccess}
+                          >
+                            {cancelling ? "Cancelling…" : "Cancel Order"}
+                          </Button>
+                          <div className="text-xs text-muted-foreground">
+                            Once cancelled, the seller won’t be able to deliver and you won’t be able to complete/review this order.
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ) : null}
+
+                    {role === "buyer" && orderStatus === "Delivered" ? (
+                      <Card>
+                        <div ref={reviewAnchorRef} id="review" />
+                        <CardHeader>
+                          <CardTitle className="text-base">Complete Order</CardTitle>
+                          <CardDescription>Mark the order complete (then you can leave a review), or request a revision.</CardDescription>
                         </CardHeader>
                         <CardContent className="space-y-3">
                           <div className="text-sm text-muted-foreground">
@@ -1078,7 +1362,7 @@ export default function OrderChat() {
                           </div>
 
                           <Button onClick={acceptOrder} disabled={accepting || !canAccess}>
-                            {accepting ? "Completing…" : "Accept Order"}
+                            {accepting ? "Completing…" : "Mark as complete"}
                           </Button>
                           <Button onClick={requestRevision} variant="outline" disabled={requestingRevision || !canAccess}>
                             {requestingRevision ? "Requesting…" : "Request Revision"}
@@ -1089,6 +1373,72 @@ export default function OrderChat() {
                               Auto-complete prompt: {String(order.autoCompleteAt)}
                             </div>
                           ) : null}
+                        </CardContent>
+                      </Card>
+                    ) : null}
+
+                    {role === "buyer" && orderStatus === "Completed" ? (
+                      <Card>
+                        <div ref={reviewAnchorRef} id="review" />
+                        <CardHeader>
+                          <CardTitle className="text-base">Rate & Review</CardTitle>
+                          <CardDescription>Share your feedback now that the order is complete.</CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                          {reviewLoading ? (
+                            <div className="text-sm text-muted-foreground">Loading your review…</div>
+                          ) : review ? (
+                            <div className="space-y-2">
+                              <div className="text-sm">
+                                Rating: <span className="font-medium">{Number(review.rating)}/5</span>
+                              </div>
+                              {String(review.comment || "").trim() ? (
+                                <div className="text-sm whitespace-pre-wrap">{String(review.comment)}</div>
+                              ) : (
+                                <div className="text-sm text-muted-foreground">No comment left.</div>
+                              )}
+                            </div>
+                          ) : (
+                            <>
+                              <div className="space-y-2">
+                                <Label>Rating</Label>
+                                <ToggleGroup
+                                  type="single"
+                                  value={reviewRating}
+                                  onValueChange={(v) => setReviewRating(String(v || ""))}
+                                  className="justify-start"
+                                >
+                                  {[1, 2, 3, 4, 5].map((n) => {
+                                    const selected = Number(reviewRating || 0);
+                                    const on = selected >= n;
+                                    return (
+                                      <ToggleGroupItem key={n} value={String(n)} aria-label={`${n} star${n === 1 ? "" : "s"}`}>
+                                        <Star
+                                          className={on ? "h-4 w-4 text-primary" : "h-4 w-4 text-muted-foreground"}
+                                          fill={on ? "currentColor" : "none"}
+                                        />
+                                      </ToggleGroupItem>
+                                    );
+                                  })}
+                                </ToggleGroup>
+                              </div>
+
+                              <div className="space-y-2">
+                                <Label htmlFor="review-comment">Review (optional)</Label>
+                                <Textarea
+                                  id="review-comment"
+                                  value={reviewComment}
+                                  onChange={(e) => setReviewComment(e.target.value)}
+                                  placeholder="What went well? Anything to improve?"
+                                  disabled={submittingReview || !canAccess}
+                                />
+                              </div>
+
+                              <Button onClick={submitReview} disabled={submittingReview || !canAccess || !reviewRating}>
+                                {submittingReview ? "Submitting…" : "Submit Review"}
+                              </Button>
+                            </>
+                          )}
                         </CardContent>
                       </Card>
                     ) : null}

@@ -18,6 +18,7 @@ import { onAuthStateChanged, signOut } from "firebase/auth";
 import { auth, db } from "@/firebase";
 import { getUserRole, roleDefaultDashboardPath, setUserRole } from "@/auth/role";
 import { useToast } from "@/hooks/use-toast";
+import { isFreelancerDocRegistered } from "@/lib/freelancerAccess";
 
 const Navbar = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -82,7 +83,7 @@ const Navbar = () => {
     const unsub = onSnapshot(
       doc(db, "freelancers", userUid),
       (snap) => {
-        const ok = snap.exists();
+        const ok = snap.exists() && isFreelancerDocRegistered(snap.data(), userUid);
         setFreelancerRegistered(ok);
         // Keep local role in sync so existing UI that reads localStorage behaves.
         // Do not force-switch the current view; only correct impossible states.

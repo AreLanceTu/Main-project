@@ -18,6 +18,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { registerAsFreelancer } from "@/lib/freelancers";
 import { ensureFreelancerEligibility } from "@/lib/geo";
+import { isFreelancerDocRegistered } from "@/lib/freelancerAccess";
 
 export default function FreelancerRegister() {
   const navigate = useNavigate();
@@ -73,7 +74,7 @@ export default function FreelancerRegister() {
       unsubReg = onSnapshot(
         doc(db, "freelancers", u.uid),
         (snap) => {
-          const ok = snap.exists();
+          const ok = snap.exists() && isFreelancerDocRegistered(snap.data(), u.uid);
           setRegistered(ok);
           setChecking(false);
           if (ok) navigate("/freelancer-dashboard", { replace: true });

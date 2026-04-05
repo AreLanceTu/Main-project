@@ -6,6 +6,9 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { useEffect, useState } from "react";
+import { db } from "@/firebase";
+import { listenSellerRatingStats } from "@/lib/publicReviews";
 
 function initials(name) {
   const s = String(name || "").trim();
@@ -36,6 +39,26 @@ export default function ChatDetails({ otherProfile, activeChat, onViewOrder, onR
     avgRating: otherProfile?.avgRating ?? "—",
     completionRate: otherProfile?.completionRate ?? "—",
   };
+
+  const [liveAvgRating, setLiveAvgRating] = useState(null);
+
+  useEffect(() => {
+    const uid = String(otherProfile?.uid || otherProfile?.userId || otherProfile?.id || "").trim();
+    const role = String(otherProfile?.role || "").trim().toLowerCase();
+    if (!uid || role !== "freelancer") {
+      setLiveAvgRating(null);
+      return undefined;
+    }
+
+    return listenSellerRatingStats(db, uid, (s) => {
+      setLiveAvgRating(typeof s.avgRating === "number" ? s.avgRating : null);
+    });
+  }, [otherProfile?.role, otherProfile?.uid, otherProfile?.userId]);
+
+  const avgRatingLabel =
+    typeof liveAvgRating === "number"
+      ? liveAvgRating.toFixed(2)
+      : stats.avgRating;
 
   return (
     <div className="h-full min-h-0">
@@ -94,7 +117,7 @@ export default function ChatDetails({ otherProfile, activeChat, onViewOrder, onR
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-white p-3">
                   <div className="text-[11px] text-slate-500">Avg rating</div>
-                  <div className="mt-1 text-sm font-semibold text-slate-900">{stats.avgRating}</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-900">{avgRatingLabel}</div>
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-white p-3">
                   <div className="text-[11px] text-slate-500">Completion</div>

@@ -28,6 +28,8 @@ type OrderDoc = {
   orderStatus: "Pending" | "In Progress" | "Delivered" | "Revision" | "Completed" | string;
   createdAt?: Timestamp | null;
   requirementsSubmitted?: boolean;
+  gigId?: string;
+  sellerId?: string;
 };
 
 function formatCreatedAt(ts?: Timestamp | null): string {
@@ -150,13 +152,24 @@ export default function MyOrders() {
                               {formatCreatedAt(o.createdAt)}
                             </TableCell>
                             <TableCell className="text-right">
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => navigate(`/orders/${encodeURIComponent(o.orderId)}/requirements`)}
-                              >
-                                Requirements / Chat
-                              </Button>
+                              <div className="flex justify-end gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => navigate(`/orders/${encodeURIComponent(o.orderId)}/requirements`)}
+                                >
+                                  Requirements / Chat
+                                </Button>
+
+                                {String(o.orderStatus || "") === "Completed" ? (
+                                  <Button
+                                    size="sm"
+                                    onClick={() => navigate(`/orders/${encodeURIComponent(o.orderId)}/chat#review`)}
+                                  >
+                                    Leave review
+                                  </Button>
+                                ) : null}
+                              </div>
                             </TableCell>
                           </TableRow>
                         ))}

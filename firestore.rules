@@ -66,6 +66,7 @@ service cloud.firestore {
           'requirementsSubmittedAt',
           'deliveredAt',
           'completedAt',
+          'cancelledAt',
           'revisionCount',
           'revisionLimit',
           'revisionRequestedAt',
@@ -99,6 +100,7 @@ service cloud.firestore {
         'requirementsSubmittedAt',
         'deliveredAt',
         'completedAt',
+        'cancelledAt',
         'revisionCount',
         'revisionLimit',
         'revisionRequestedAt',
@@ -161,9 +163,20 @@ service cloud.firestore {
         && request.resource.data.revisionCount == prevUsed + 1
         && request.resource.data.revisionCount <= limit;
 
+      // Buyer can cancel before delivery.
+      // Strict key set: only orderStatus/cancelledAt/updatedAt may change.
+      let preDeliveryToCancelled =
+        (resource.data.orderStatus == 'Pending'
+          || resource.data.orderStatus == 'In Progress'
+          || resource.data.orderStatus == 'Revision')
+        && request.resource.data.orderStatus == 'Cancelled'
+        && isOrderBuyer(orderId)
+        && (request.resource.data.cancelledAt is timestamp)
+        && changed.hasOnly(['orderStatus', 'cancelledAt', 'updatedAt']);
+
       return orderStatusUpdateKeysAllowed(changed)
         && coreUnchanged
-        && (pendingToInProgress || inProgressOrRevisionToDelivered || deliveredToCompleted || deliveredToRevision);
+        && (pendingToInProgress || inProgressOrRevisionToDelivered || deliveredToCompleted || deliveredToRevision || preDeliveryToCancelled);
     }
 
     function isValidServiceWrite(serviceId) {
@@ -531,6 +544,85 @@ service cloud.firestore {
         && request.resource.data.sellerId == request.auth.uid
         && request.resource.data.buyerId == orderParticipants(orderId).data.clientId
         && request.resource.data.deliveredAt is timestamp;
+      allow update, delete: if false;
+    }
+
+    // Order reviews (1 per order)
+    // - Buyer can create only after the order is Completed
+    // - Buyer and seller can read
+    match /order_reviews/{orderId} {
+      allow read: if isOrderParticipant(orderId);
+
+      allow create: if isOrderBuyer(orderId)
+        && orderParticipants(orderId).data.orderStatus == 'Completed'
+        && request.resource.data.orderId == orderId
+        && request.resource.data.gigId is string
+        && request.resource.data.serviceId is string
+        && request.resource.data.buyerId == request.auth.uid
+        && request.resource.data.sellerId == orderParticipants(orderId).data.sellerId
+        && request.resource.data.serviceId == orderParticipants(orderId).data.serviceId
+        && request.resource.data.rating is int
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5
+        && request.resource.data.comment is string
+        && request.resource.data.comment.size() <= 2000
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.keys().hasAll([
+          'orderId',
+          'gigId',
+          'serviceId',
+          'sellerId',
+          'buyerId',
+          'rating',
+          'comment',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'orderId',
+          'gigId',
+          'serviceId',
+          'sellerId',
+          'buyerId',
+          'rating',
+          'comment',
+          'createdAt'
+        ]);
+
+      allow update, delete: if false;
+    }
+
+    // Public-safe order reviews
+    // - Contains only rating/comment (no buyerId)
+    // - Readable by any signed-in user so ratings can be shown on profiles
+    // - Creatable only by the buyer after the order is Completed
+    match /public_order_reviews/{orderId} {
+      allow read: if isSignedIn();
+
+      allow create: if isOrderBuyer(orderId)
+        && orderParticipants(orderId).data.orderStatus == 'Completed'
+        && request.resource.data.orderId == orderId
+        && request.resource.data.sellerId == orderParticipants(orderId).data.sellerId
+        && request.resource.data.rating is int
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5
+        && request.resource.data.comment is string
+        && request.resource.data.comment.size() <= 2000
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.keys().hasAll([
+          'orderId',
+          'sellerId',
+          'rating',
+          'comment',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'orderId',
+          'sellerId',
+          'rating',
+          'comment',
+          'createdAt'
+        ]);
+
       allow update, delete: if false;
     }
 

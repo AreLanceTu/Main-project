@@ -19,6 +19,7 @@ import { auth, db } from "@/firebase";
 import { getUserRole, roleDefaultDashboardPath, consumePendingRole, setUserRole } from "@/auth/role";
 import { ensureUserProfile } from "@/lib/userProfile";
 import { ensureFreelancerEligibility, resolveCountryCode } from "@/lib/geo";
+import { isFreelancerDocRegistered } from "@/lib/freelancerAccess";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -74,7 +75,7 @@ export default function Login() {
     if (!uid) return "client";
     try {
       const snap = await getDoc(doc(db, "freelancers", uid));
-      const role = snap.exists() ? "freelancer" : "client";
+      const role = snap.exists() && isFreelancerDocRegistered(snap.data(), uid) ? "freelancer" : "client";
       setUserRole(uid, role);
       return role;
     } catch {

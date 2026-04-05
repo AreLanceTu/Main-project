@@ -22,6 +22,7 @@ import { Separator } from "@/components/ui/separator";
 import { auth, db } from "@/firebase";
 import { uploadOrderFiles, type UploadedFile } from "@/lib/orderUploads";
 import { useToast } from "@/hooks/use-toast";
+import { supabaseSignedDownloadUrl } from "@/lib/supabaseStorage";
 
 type OrderDoc = {
   orderId: string;
@@ -36,6 +37,18 @@ type OrderDoc = {
   revisionCount?: number;
 };
 
+type RequirementsDoc = {
+  orderId: string;
+  buyerId: string;
+  sellerId: string;
+  title: string;
+  description: string;
+  deliverables?: string;
+  references?: string;
+  files?: UploadedFile[];
+  submittedAt?: any;
+};
+
 export default function OrderRequirements() {
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -46,6 +59,7 @@ export default function OrderRequirements() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [order, setOrder] = useState<OrderDoc | null>(null);
+  const [existingReq, setExistingReq] = useState<RequirementsDoc | null>(null);
   const [requirements, setRequirements] = useState({
     title: "",
     description: "",
@@ -53,6 +67,7 @@ export default function OrderRequirements() {
     references: "",
   });
   const [files, setFiles] = useState<File[]>(() => []);
+  const [existingFiles, setExistingFiles] = useState<UploadedFile[]>(() => []);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => setUser(u));
@@ -72,8 +87,17 @@ export default function OrderRequirements() {
 
         const reqSnap = await getDoc(doc(db, "order_requirements", orderId));
         if (reqSnap.exists()) {
-          navigate(`/orders/${encodeURIComponent(orderId)}/chat`, { replace: true });
-          return;
+          const r = reqSnap.data() as RequirementsDoc;
+          if (!cancelled) {
+            setExistingReq(r);
+            setRequirements({
+              title: String(r.title || ""),
+              description: String(r.description || ""),
+              deliverables: String((r as any).deliverables || ""),
+              references: String((r as any).references || ""),
+            });
+            setExistingFiles(Array.isArray((r as any).files) ? ((r as any).files as UploadedFile[]) : []);
+          }
         }
       } catch (e: any) {
         if (!cancelled) {
@@ -94,15 +118,62 @@ export default function OrderRequirements() {
     };
   }, [orderId, navigate, toast]);
 
+  const requirementsExists = Boolean(existingReq);
+
   const blockedReason = useMemo(() => {
     if (loading) return null;
     if (!user?.uid) return "You must be logged in.";
     if (!order) return "Order not found.";
-    if (order.clientId !== user.uid) return "Only the buyer can submit requirements.";
+
+    const buyerOk = order.clientId === user.uid;
+    const sellerOk = Boolean(order.sellerId) && order.sellerId === user.uid;
+
+    if (requirementsExists) {
+      if (!buyerOk && !sellerOk) return "You don’t have access to this order.";
+      return null;
+    }
+
+    // Submit mode
+    if (!buyerOk) return "Only the buyer can submit requirements.";
     if (String(order.paymentStatus || "").toLowerCase() !== "paid") return "Payment must be completed first.";
     if (!order.sellerId) return "This order is missing a seller id.";
     return null;
-  }, [loading, order, user?.uid]);
+  }, [loading, order, requirementsExists, user?.uid]);
+
+  async function openUploadedFile(file: UploadedFile) {
+    const path = String(file?.path || "").trim();
+    if (path) {
+      try {
+        const { signedUrl } = await supabaseSignedDownloadUrl({
+          bucket: "orders",
+          path,
+          expiresInSeconds: 60 * 30,
+        });
+        if (!signedUrl) throw new Error("No signed URL returned");
+        window.open(signedUrl, "_blank", "noopener,noreferrer");
+        return;
+      } catch (e: any) {
+        toast({
+          title: "Could not open file",
+          description: e?.message || "Please try again.",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+
+    const direct = String(file?.url || "").trim();
+    if (direct) {
+      window.open(direct, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    toast({
+      title: "Could not open file",
+      description: "Missing file path.",
+      variant: "destructive",
+    });
+  }
 
   async function submit() {
     if (submitting) return;
@@ -231,7 +302,7 @@ export default function OrderRequirements() {
                       value={requirements.title}
                       onChange={(e) => setRequirements((p) => ({ ...p, title: e.target.value }))}
                       placeholder="e.g. Redesign landing page sections"
-                      disabled={Boolean(blockedReason) || submitting}
+                      disabled={Boolean(blockedReason) || submitting || requirementsExists}
                     />
                   </div>
 
@@ -243,7 +314,7 @@ export default function OrderRequirements() {
                       onChange={(e) => setRequirements((p) => ({ ...p, description: e.target.value }))}
                       placeholder="Share scope, goals, and constraints…"
                       className="min-h-[140px]"
-                      disabled={Boolean(blockedReason) || submitting}
+                      disabled={Boolean(blockedReason) || submitting || requirementsExists}
                     />
                   </div>
 
@@ -254,7 +325,7 @@ export default function OrderRequirements() {
                       value={requirements.deliverables}
                       onChange={(e) => setRequirements((p) => ({ ...p, deliverables: e.target.value }))}
                       placeholder="What should be delivered?"
-                      disabled={Boolean(blockedReason) || submitting}
+                      disabled={Boolean(blockedReason) || submitting || requirementsExists}
                     />
                   </div>
 
@@ -265,43 +336,75 @@ export default function OrderRequirements() {
                       value={requirements.references}
                       onChange={(e) => setRequirements((p) => ({ ...p, references: e.target.value }))}
                       placeholder="Figma links, examples, brand assets…"
-                      disabled={Boolean(blockedReason) || submitting}
+                      disabled={Boolean(blockedReason) || submitting || requirementsExists}
                     />
                   </div>
 
                   <Separator />
 
-                  <div className="space-y-2">
-                    <Label htmlFor="req-files">Upload files (optional)</Label>
-                    <Input
-                      id="req-files"
-                      type="file"
-                      multiple
-                      onChange={(e) => setFiles(Array.from(e.target.files || []))}
-                      disabled={Boolean(blockedReason) || submitting}
-                    />
-                    {!files.length ? (
-                      <div className="text-xs text-muted-foreground">
-                        Optional — you can submit requirements without any files/images.
+                  {requirementsExists ? (
+                    <div className="space-y-3">
+                      <div className="text-sm text-muted-foreground">
+                        Requirements submitted{existingReq?.submittedAt?.toDate ? ` at ${existingReq.submittedAt.toDate().toLocaleString()}` : ""}.
                       </div>
-                    ) : null}
-                    {files.length ? (
-                      <div className="text-xs text-muted-foreground">Selected: {files.length} file(s)</div>
-                    ) : null}
-                  </div>
 
-                  <div className="flex items-center gap-2">
-                    <Button onClick={submit} disabled={Boolean(blockedReason) || submitting}>
-                      {submitting ? "Submitting…" : "Submit requirements"}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() => navigate("/my-orders")}
-                      disabled={submitting}
-                    >
-                      Back
-                    </Button>
-                  </div>
+                      <div className="space-y-2">
+                        <Label>Files</Label>
+                        {existingFiles.length ? (
+                          <div className="space-y-1 text-sm">
+                            {existingFiles.map((f) => (
+                              <div key={f.path || f.url || f.name}>
+                                <button type="button" className="underline" onClick={() => void openUploadedFile(f)}>
+                                  {f.name}
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-muted-foreground">No files attached.</div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <Button onClick={() => navigate(`/orders/${encodeURIComponent(orderId)}/chat`)}>
+                          Back to chat
+                        </Button>
+                        <Button variant="outline" onClick={() => navigate("/my-orders")}>
+                          Back
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="space-y-2">
+                        <Label htmlFor="req-files">Upload files (optional)</Label>
+                        <Input
+                          id="req-files"
+                          type="file"
+                          multiple
+                          onChange={(e) => setFiles(Array.from(e.target.files || []))}
+                          disabled={Boolean(blockedReason) || submitting}
+                        />
+                        {!files.length ? (
+                          <div className="text-xs text-muted-foreground">
+                            Optional — you can submit requirements without any files/images.
+                          </div>
+                        ) : null}
+                        {files.length ? (
+                          <div className="text-xs text-muted-foreground">Selected: {files.length} file(s)</div>
+                        ) : null}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <Button onClick={submit} disabled={Boolean(blockedReason) || submitting}>
+                          {submitting ? "Submitting…" : "Submit requirements"}
+                        </Button>
+                        <Button variant="outline" onClick={() => navigate("/my-orders")} disabled={submitting}>
+                          Back
+                        </Button>
+                      </div>
+                    </>
+                  )}
                 </div>
               </CardContent>
             </Card>

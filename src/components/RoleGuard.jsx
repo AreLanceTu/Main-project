@@ -6,6 +6,7 @@ import { doc, onSnapshot } from "firebase/firestore";
 import { auth } from "@/firebase";
 import { db } from "@/firebase";
 import { setUserRole } from "@/auth/role";
+import { isFreelancerDocRegistered } from "@/lib/freelancerAccess";
 
 /**
  * RoleGuard
@@ -45,7 +46,7 @@ export default function RoleGuard({ role, redirectTo = "/dashboard", children })
           (snap) => {
             // Guard against any stale snapshot callbacks.
             if (cancelled || activeUidRef.current !== uid) return;
-            const ok = snap.exists();
+            const ok = snap.exists() && isFreelancerDocRegistered(snap.data(), uid);
             setAllowed(ok);
             // Keep local routing state in sync for components that still read localStorage.
             setUserRole(uid, ok ? "freelancer" : "client");
